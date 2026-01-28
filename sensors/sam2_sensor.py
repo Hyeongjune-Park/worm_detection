@@ -67,6 +67,17 @@ class Sam2Sensor(Sensor):
         try:
             self._torch = torch
             device = "cuda" if torch.cuda.is_available() else "cpu"
+
+            # Hydra config search path 설정 (SAM2.1 requires hydra configs)
+            config_dir = os.path.join(sam2_dir, "sam2", "configs")
+            if os.path.isdir(config_dir):
+                from hydra.core.global_hydra import GlobalHydra  # type: ignore
+                from hydra import initialize_config_dir  # type: ignore
+                GlobalHydra.instance().clear()
+                ctx = initialize_config_dir(config_dir=os.path.abspath(config_dir), version_base="1.2")
+                ctx.__enter__()
+                # keep context open for lifetime of process
+
             model = build_sam2(self.model_type, self.ckpt, device=device)
             self._predictor = SAM2ImagePredictor(model)
             self._available = True

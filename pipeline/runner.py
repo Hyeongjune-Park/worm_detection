@@ -194,6 +194,9 @@ def run_pipeline(
             if fusion.do_kalman_update:
                 tr.kf.set_measurement_noise(fusion.measurement_r)
                 tr.kf.update(fusion.center[0], fusion.center[1])
+            else:
+                # predict-only → 속도 감쇠로 무한 드리프트 방지
+                tr.kf.decay_velocity(0.5)
 
             # f) Track 필드 갱신
             tr.last_center = fusion.center
@@ -202,11 +205,23 @@ def run_pipeline(
             tr.quality_history.append(fusion.quality_score)
             tr.last_seen_frame = frame_idx
 
-            # bbox 갱신 (SAM2 mask가 있는 경우)
+            # bbox 갱신
             if sam2_result is not None and sam2_result.bbox_roi is not None and fusion.sensor_used == "SAM2":
+                # SAM2 mask 기반 정밀 bbox
                 full_bbox = roi_mgr.to_full_coords_bbox(sam2_result.bbox_roi, roi)
                 tr.bbox = full_bbox
                 tr.area = sam2_result.area
+            elif fusion.do_kalman_update and fusion.center is not None:
+                # SAM2 미사용 시 center 기반 bbox 유지 (기존 크기 보존)
+                fcx, fcy = fusion.center
+                if tr.bbox is not None:
+                    bw = tr.bbox[2] - tr.bbox[0]
+                    bh = tr.bbox[3] - tr.bbox[1]
+                else:
+                    bw, bh = 60, 60
+                half_w, half_h = bw // 2, bh // 2
+                tr.bbox = (int(fcx - half_w), int(fcy - half_h),
+                           int(fcx + half_w), int(fcy + half_h))
 
             # g) Head 추정
             velocity = tr.kf.get_velocity()
@@ -221,8 +236,8 @@ def run_pipeline(
             new_state = state_machine.update(tr, fusion, frame_idx, arena_rect, frame_size)
             tr.state = new_state
 
-            # i) Template update (좋은 품질일 때만)
-            if fusion.quality_score > 0:
+            # i) Template update (SAM2 융합 성공 시에만 — drift-lock 방지)
+            if fusion.sensor_used == "SAM2" and fusion.quality_score >= 0.7:
                 tpl_sensor.update_template(tr, roi, crop_gray, fusion.quality_score)
 
             # j) Immobility check

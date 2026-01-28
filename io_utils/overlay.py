@@ -46,16 +46,6 @@ def draw_overlay(
         if cx is not None and cy is not None:
             cv2.circle(frame_bgr, (int(cx), int(cy)), 4, color, -1)
 
-            # head arrow
-            if tr.last_head is not None:
-                hx, hy = tr.last_head
-                cv2.arrowedLine(
-                    frame_bgr,
-                    (int(cx), int(cy)),
-                    (int(hx), int(hy)),
-                    (0, 0, 255), 2, tipLength=0.3,
-                )
-
         # text
         txt = f"id={tr.id} {tr.state.value}"
         if tr.sensor_used:

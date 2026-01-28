@@ -93,9 +93,10 @@ def fuse(
     if c_sam2 is not None and sam2_trustable:
         pred_ok = (d_pred <= dist_pred_th)
         tpl_ok = (c_tpl is None) or (d_tpl <= dist_tpl_th)
+        klt_ok = (c_klt is None) or (d_klt <= dist_klt_th)
         border_ok = (border_touch <= border_th)
 
-        if pred_ok and tpl_ok and border_ok:
+        if pred_ok and tpl_ok and klt_ok and border_ok:
             return FusionResult(
                 center=c_sam2,
                 sensor_used="SAM2",

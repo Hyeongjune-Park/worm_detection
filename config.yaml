@@ -25,9 +25,9 @@ preprocess:
 
 # Arena (영역 밖 무시)
 arena:
-  enabled: true
+  enabled: false
   manual_rect:
-    enabled: true
+    enabled: false
     x0: 0
     y0: 0
     x1: 0
@@ -43,8 +43,8 @@ roi:
 sensors:
   sam2:
     enabled: true
-    model_type: "sam2_hiera_tiny"
-    checkpoint_path: "sam2/checkpoints/sam2_hiera_tiny.pt"
+    model_type: "sam2.1/sam2.1_hiera_t"
+    checkpoint_path: "sam2/checkpoints/sam2.1_hiera_tiny.pt"
     update_every_n: 1
     measurement_noise_r: 10.0
   template:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 import yaml
 
@@ -50,12 +51,18 @@ def main():
     ap = argparse.ArgumentParser(description="Insect tracking pipeline (human-in-the-loop)")
     ap.add_argument("--config", default="config.yaml", help="config yaml")
     ap.add_argument("--input", required=True, help="video file or frames dir")
-    ap.add_argument("--output", required=True, help="output dir")
+    ap.add_argument("--output", default="", help="output dir (default: output/YYYYMMDD_HHMMSS)")
     ap.add_argument("--seeds", required=True, help="seeds yaml from select_seeds.py")
     ap.add_argument("--arena", default="", help="arena yaml from select_arena.py (optional)")
     args = ap.parse_args()
 
     cfg = load_yaml(args.config)
+
+    # output 자동 생성
+    output_dir = args.output
+    if not output_dir:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = f"output/{ts}"
 
     if args.arena:
         arena_cfg = load_yaml(args.arena)
@@ -65,9 +72,9 @@ def main():
     cfg.setdefault("input", {})["path"] = args.input
 
     # output dir override
-    cfg.setdefault("project", {})["output_dir"] = args.output
+    cfg.setdefault("project", {})["output_dir"] = output_dir
 
-    out_dir = Path(args.output)
+    out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     run_pipeline(

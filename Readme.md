@@ -71,20 +71,9 @@ insect_tracking/
 │   ├── artifacts.py            # CSV/JSONL 결과 저장 + EventWriter
 │   └── overlay.py              # 상태별 색상 오버레이 그리기
 │
-├── detection/                  # [레거시] 배경차분 기반 자동 탐지
-│   ├── background_model.py
-│   └── motion_detector.py
-│
-├── segmentation/               # [레거시] 구 세그멘테이션 인터페이스
-│   ├── base.py
-│   └── sam2_adapter.py
-│
-├── tracking/                   # [레거시] Hungarian MOT (현재 미사용)
-│   ├── association.py
-│   └── multi_tracker.py
-│
 └── devlog/                     # 작업 기록 (날짜별 md 파일)
-    └── 2026-01-27.md
+    ├── 2026-01-27.md
+    └── 2026-01-28.md
 ```
 
 ---
@@ -145,7 +134,7 @@ d_tpl  = ||center_SAM2 - center_TPL||  / ROI_diagonal
 
 | Case | 조건 | 결과 |
 |------|------|------|
-| **A (Good SAM2)** | d_pred, d_tpl 모두 임계값 이내 + border_touch 낮음 | SAM2 좌표 채택, ACTIVE |
+| **A (Good SAM2)** | d_pred, d_tpl, d_klt 모두 임계값 이내 + border_touch 낮음 | SAM2 좌표 채택, ACTIVE |
 | **B (Fallback)** | SAM2 불신 또는 MERGED 상태 | Template 또는 KLT 좌표 사용, UNCERTAIN |
 | **C (Predict Only)** | 모든 센서 불신 | Kalman 예측값 유지, OCCLUDED |
 
@@ -155,6 +144,7 @@ d_tpl  = ||center_SAM2 - center_TPL||  / ROI_diagonal
 #### (e) Kalman Update
 - Fusion이 승인한 경우에만 관측값으로 Kalman Filter 업데이트
 - 센서별 measurement noise 차등 적용 (SAM2: 10, Template/KLT: 25)
+- Predict-only(Case C)일 때 속도를 50%씩 감쇠하여 무한 드리프트 방지
 
 #### (f) Track 상태 갱신
 - `last_center`, `sensor_used`, `quality_score` 등 업데이트
