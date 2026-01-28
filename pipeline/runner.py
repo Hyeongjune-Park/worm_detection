@@ -240,6 +240,14 @@ def run_pipeline(
             if fusion.sensor_used == "SAM2" and fusion.quality_score >= 0.7:
                 tpl_sensor.update_template(tr, roi, crop_gray, fusion.quality_score)
 
+            # i-2) KLT reinit: SAM2 성공인데 KLT가 크게 벗어나면 feature 재초기화
+            if fusion.sensor_used == "SAM2" and klt_result is not None:
+                from math import sqrt
+                klt_sam2_dist = sqrt((klt_result.center[0] - fusion.center[0])**2 +
+                                     (klt_result.center[1] - fusion.center[1])**2)
+                if klt_sam2_dist > roi_size_val * 0.15:
+                    klt_sensor.initialize(tr, roi, crop_bgr, crop_gray)
+
             # j) Immobility check
             state_machine.check_immobility(tr, fps)
 

@@ -105,7 +105,8 @@ class Sam2Sensor(Sensor):
 
         try:
             return self._measure_sam2(track, roi, crop_bgr)
-        except Exception:
+        except Exception as e:
+            print(f"[SAM2] measure exception track={track.id} frame={frame_idx}: {e}")
             return None
 
     def _measure_sam2(self, track: Track, roi: RoiWindow,
