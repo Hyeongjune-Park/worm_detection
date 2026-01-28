@@ -1,0 +1,101 @@
+# config.yaml — Human-in-the-Loop Multi-Sensor Tracking Pipeline
+
+project:
+  output_dir: "outputs"
+  save_overlay_video: true
+  save_csv: true
+  save_events: true
+
+input:
+  path: "video"
+
+video:
+  fps_fallback: 30
+  overlay_fourcc: "mp4v"
+
+preprocess:
+  use_gray: true
+  denoise:
+    enabled: true
+    ksize: 3
+  clahe:
+    enabled: false
+    clipLimit: 2.0
+    tileGridSize: [8, 8]
+
+# Arena (영역 밖 무시)
+arena:
+  enabled: true
+  manual_rect:
+    enabled: true
+    x0: 0
+    y0: 0
+    x1: 0
+    y1: 0
+
+# ROI (트랙별 관심 영역)
+roi:
+  base_size: 384
+  min_size: 256
+  max_size: 640
+
+# 센서 설정
+sensors:
+  sam2:
+    enabled: true
+    model_type: "sam2_hiera_tiny"
+    checkpoint_path: "sam2/checkpoints/sam2_hiera_tiny.pt"
+    update_every_n: 1
+    measurement_noise_r: 10.0
+  template:
+    enabled: true
+    patch_size: 64
+    use_edge: true
+    update_quality_thresh: 0.85
+    measurement_noise_r: 25.0
+  klt:
+    enabled: true
+    max_corners: 100
+    quality_level: 0.01
+    min_distance: 7
+    win_size: 15
+    max_level: 3
+    min_valid_points: 10
+    measurement_noise_r: 25.0
+
+# QA / Fusion (교차검증) — ROI diagonal 대비 비율 기반
+qa:
+  dist_pred_ratio: 0.12        # SAM2↔predict 거리 / ROI_diag
+  dist_tpl_ratio: 0.12         # SAM2↔template 거리 / ROI_diag
+  dist_klt_ratio: 0.12         # SAM2↔KLT 거리 / ROI_diag
+  border_touch_thresh: 0.3
+  uncertain_to_occluded_frames: 5
+  occluded_to_reseed_frames: 30
+
+# 트래킹 전반
+tracking:
+  max_tracks: 10
+  kalman:
+    process_noise_q: 2.0
+    default_measurement_noise_r: 25.0
+  state_machine:
+    border_exit_margin_px: 5
+    immobile_window: 60
+    immobile_speed_px_per_s: 1.0
+    merge_distance_px: 30.0
+
+# Head 추정 (보조)
+head:
+  enabled: true
+  min_movement_px: 2.0
+  smoothing_window: 5
+
+# 모션 검출 (보조/복구 힌트용, 주 센서 아님)
+detection:
+  bg:
+    alpha: 0.02
+    freeze_fg_update: true
+  fg:
+    threshold: 25
+    morph_open: 3
+    morph_close: 5

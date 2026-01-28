@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+
+# SAM2 submodule / weights
+sam2/
+
+# Video files
+*.mp4
+*.avi
+*.mkv
+*.mov
+
+# Runtime outputs
+outputs/
+output/
+seeds.yaml
+arena.yaml
+arena_manual.yaml
+
+# Environment
+.env
+
+# IDE / Claude
+.vscode/
+.idea/
+.claude/
+
+# OS
+Thumbs.db
+.DS_Store
+nul
