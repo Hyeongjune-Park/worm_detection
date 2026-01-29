@@ -36,6 +36,7 @@ class Track:
     # --- bbox (디버그용) ---
     bbox: Optional[Tuple[int, int, int, int]] = None
     area: Optional[int] = None
+    seed_bbox_size: Optional[Tuple[int, int]] = None  # (width, height) from initial seed
 
     # --- 센서 메모리 ---
     template: Optional[np.ndarray] = None           # gray+edge patch

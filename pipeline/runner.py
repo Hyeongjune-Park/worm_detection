@@ -11,7 +11,7 @@ import yaml
 from io_utils.video_reader import VideoReader
 from io_utils.video_writer import OverlayWriter
 from io_utils.artifacts import ArtifactWriter, EventWriter
-from io_utils.overlay import draw_overlay
+from io_utils.overlay import draw_overlay, DebugInfo
 
 from preprocess.preprocess import Preprocessor
 from tracking.track import Track, TrackState
@@ -59,6 +59,7 @@ def _create_tracks_from_seeds(
         kf = KalmanFilter2D(cx, cy, q=q, r=r)
         tr = Track(id=tid, kf=kf)
         tr.bbox = (int(x0), int(y0), int(x1), int(y1))
+        tr.seed_bbox_size = (int(x1 - x0), int(y1 - y0))  # 시드 박스 크기 저장
         tr.last_center = (cx, cy)
         tr.state = TrackState.ACTIVE
         tracks.append(tr)
@@ -146,6 +147,8 @@ def run_pipeline(
             first_frame = False
 
         # --- Per-track 처리 ---
+        debug_infos: Dict[int, DebugInfo] = {}
+
         for tr in tracks:
             if tr.state in (TrackState.EXITED, TrackState.NEEDS_RESEED):
                 continue
@@ -259,6 +262,16 @@ def run_pipeline(
                     "quality": fusion.quality_score,
                 })
 
+            # l) 디버그 정보 수집
+            debug_infos[tr.id] = DebugInfo(
+                track_id=tr.id,
+                roi=(roi.x0, roi.y0, roi.x1, roi.y1),
+                pred_center=pred_center,
+                sam2_center=sam2_result.center if sam2_result else None,
+                tpl_center=tpl_result.center if tpl_result else None,
+                klt_center=klt_result.center if klt_result else None,
+            )
+
         # --- Merge detection ---
         merge_events = state_machine.check_merges(tracks)
         if event_writer:
@@ -269,7 +282,7 @@ def run_pipeline(
         artifacts.write_frame(frame_idx, tracks, frame_size=frame_size, fps=fps)
 
         if overlay_writer is not None:
-            overlay = draw_overlay(frame_bgr.copy(), tracks, frame_idx, arena_rect)
+            overlay = draw_overlay(frame_bgr.copy(), tracks, frame_idx, arena_rect, debug_infos)
             overlay_writer.write(overlay)
 
     # --- 정리 ---
