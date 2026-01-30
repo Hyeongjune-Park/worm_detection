@@ -45,3 +45,8 @@ class KalmanFilter2D:
 
     def get_velocity(self) -> tuple[float, float]:
         return float(self.x[2]), float(self.x[3])
+
+    def decay_velocity(self, factor: float = 0.5):
+        """predict-only 반복 시 속도를 감쇠하여 무한 드리프트 방지."""
+        self.x[2] *= factor
+        self.x[3] *= factor

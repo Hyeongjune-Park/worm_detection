@@ -90,12 +90,17 @@ def fuse(
     sam2_trustable = not is_merged
 
     # --- Case A: SAM2 신뢰 (MERGED가 아닐 때만) ---
+    # 2-of-3 교차검증: SAM2 + (pred 필수) + (tpl OR klt 중 하나 이상 동의 또는 둘 다 None)
     if c_sam2 is not None and sam2_trustable:
         pred_ok = (d_pred <= dist_pred_th)
         tpl_ok = (c_tpl is None) or (d_tpl <= dist_tpl_th)
+        klt_ok = (c_klt is None) or (d_klt <= dist_klt_th)
         border_ok = (border_touch <= border_th)
 
-        if pred_ok and tpl_ok and border_ok:
+        # tpl/klt 중 하나라도 동의하면 OK (둘 다 None이면 SAM2+pred만으로 통과)
+        secondary_ok = tpl_ok or klt_ok
+
+        if pred_ok and secondary_ok and border_ok:
             return FusionResult(
                 center=c_sam2,
                 sensor_used="SAM2",

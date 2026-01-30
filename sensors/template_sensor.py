@@ -74,7 +74,7 @@ class TemplateSensor(Sensor):
             return None
 
         # gray NCC
-        res_gray = cv2.matchTemplate(crop_gray, tpl, cv2.TM_CCORR_NORMED)
+        res_gray = cv2.matchTemplate(crop_gray, tpl, cv2.TM_CCOEFF_NORMED)
         score = float(res_gray.max())
 
         # edge NCC (optional blend)
@@ -82,7 +82,7 @@ class TemplateSensor(Sensor):
             edge_crop = self._edge(crop_gray)
             edge_tpl = track.template_edge
             if edge_tpl.shape[0] <= edge_crop.shape[0] and edge_tpl.shape[1] <= edge_crop.shape[1]:
-                res_edge = cv2.matchTemplate(edge_crop, edge_tpl, cv2.TM_CCORR_NORMED)
+                res_edge = cv2.matchTemplate(edge_crop, edge_tpl, cv2.TM_CCOEFF_NORMED)
                 # 두 결과 결합 (같은 크기 보장)
                 min_h = min(res_gray.shape[0], res_edge.shape[0])
                 min_w = min(res_gray.shape[1], res_edge.shape[1])

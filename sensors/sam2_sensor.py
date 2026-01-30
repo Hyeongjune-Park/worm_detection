@@ -67,6 +67,17 @@ class Sam2Sensor(Sensor):
         try:
             self._torch = torch
             device = "cuda" if torch.cuda.is_available() else "cpu"
+
+            # Hydra config search path 설정 (SAM2.1 requires hydra configs)
+            config_dir = os.path.join(sam2_dir, "sam2", "configs")
+            if os.path.isdir(config_dir):
+                from hydra.core.global_hydra import GlobalHydra  # type: ignore
+                from hydra import initialize_config_dir  # type: ignore
+                GlobalHydra.instance().clear()
+                ctx = initialize_config_dir(config_dir=os.path.abspath(config_dir), version_base="1.2")
+                ctx.__enter__()
+                # keep context open for lifetime of process
+
             model = build_sam2(self.model_type, self.ckpt, device=device)
             self._predictor = SAM2ImagePredictor(model)
             self._available = True
@@ -94,28 +105,32 @@ class Sam2Sensor(Sensor):
 
         try:
             return self._measure_sam2(track, roi, crop_bgr)
-        except Exception:
+        except Exception as e:
+            print(f"[SAM2] measure exception track={track.id} frame={frame_idx}: {e}")
             return None
 
     def _measure_sam2(self, track: Track, roi: RoiWindow,
                       crop_bgr: np.ndarray) -> Optional[SensorResult]:
-        center = track.center()
-        if center[0] is None:
-            return None
-
         h, w = crop_bgr.shape[:2]
 
-        # box prompt
-        if track.bbox is not None:
-            bx0, by0, bx1, by1 = track.bbox
-            box = np.array([
-                bx0 - roi.x0, by0 - roi.y0,
-                bx1 - roi.x0, by1 - roi.y0
-            ], dtype=np.float32)
+        # Box prompt: Kalman 예측 위치 중심으로 생성
+        # 핵심: 빠르게 움직이는 벌레도 Kalman이 예측한 위치에서 찾아야 함
+        pred_x, pred_y = track.kf.get_position()
+        cx_roi = pred_x - roi.x0
+        cy_roi = pred_y - roi.y0
+
+        # Box 크기: seed bbox 크기를 상한으로 사용
+        # 사용자가 시드 지정 시 벌레 전체를 감싸도록 그리므로 그 크기가 상한
+        if track.seed_bbox_size is not None:
+            seed_w, seed_h = track.seed_bbox_size
+            half_w, half_h = seed_w // 2, seed_h // 2
         else:
-            cx = center[0] - roi.x0
-            cy = center[1] - roi.y0
-            box = np.array([cx - 30, cy - 30, cx + 30, cy + 30], dtype=np.float32)
+            half_w, half_h = 50, 50  # fallback: 100x100
+
+        box = np.array([
+            cx_roi - half_w, cy_roi - half_h,
+            cx_roi + half_w, cy_roi + half_h
+        ], dtype=np.float32)
 
         box[0] = max(0, box[0])
         box[1] = max(0, box[1])
@@ -125,16 +140,13 @@ class Sam2Sensor(Sensor):
         crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
         self._predictor.set_image(crop_rgb)
 
-        # Fix 7: 이전 QA 좋은 프레임의 mask center → point prompt 힌트
+        # Point prompt: Kalman 예측 위치 사용
+        # 핵심: 이전 위치가 아닌 현재 예측 위치에서 벌레를 찾음
         point_coords = None
         point_labels = None
-        prev_center = self._prev_centers.get(track.id)
-        if prev_center is not None:
-            px = prev_center[0] - roi.x0
-            py = prev_center[1] - roi.y0
-            if 0 <= px < w and 0 <= py < h:
-                point_coords = np.array([[px, py]], dtype=np.float32)
-                point_labels = np.array([1], dtype=np.int32)
+        if 0 <= cx_roi < w and 0 <= cy_roi < h:
+            point_coords = np.array([[cx_roi, cy_roi]], dtype=np.float32)
+            point_labels = np.array([1], dtype=np.int32)
 
         masks, scores, _ = self._predictor.predict(
             box=box[None, :],

@@ -11,7 +11,7 @@ import yaml
 from io_utils.video_reader import VideoReader
 from io_utils.video_writer import OverlayWriter
 from io_utils.artifacts import ArtifactWriter, EventWriter
-from io_utils.overlay import draw_overlay
+from io_utils.overlay import draw_overlay, DebugInfo
 
 from preprocess.preprocess import Preprocessor
 from tracking.track import Track, TrackState
@@ -59,6 +59,7 @@ def _create_tracks_from_seeds(
         kf = KalmanFilter2D(cx, cy, q=q, r=r)
         tr = Track(id=tid, kf=kf)
         tr.bbox = (int(x0), int(y0), int(x1), int(y1))
+        tr.seed_bbox_size = (int(x1 - x0), int(y1 - y0))  # 시드 박스 크기 저장
         tr.last_center = (cx, cy)
         tr.state = TrackState.ACTIVE
         tracks.append(tr)
@@ -146,6 +147,8 @@ def run_pipeline(
             first_frame = False
 
         # --- Per-track 처리 ---
+        debug_infos: Dict[int, DebugInfo] = {}
+
         for tr in tracks:
             if tr.state in (TrackState.EXITED, TrackState.NEEDS_RESEED):
                 continue
@@ -194,6 +197,9 @@ def run_pipeline(
             if fusion.do_kalman_update:
                 tr.kf.set_measurement_noise(fusion.measurement_r)
                 tr.kf.update(fusion.center[0], fusion.center[1])
+            else:
+                # predict-only → 속도 감쇠로 무한 드리프트 방지
+                tr.kf.decay_velocity(0.5)
 
             # f) Track 필드 갱신
             tr.last_center = fusion.center
@@ -202,11 +208,23 @@ def run_pipeline(
             tr.quality_history.append(fusion.quality_score)
             tr.last_seen_frame = frame_idx
 
-            # bbox 갱신 (SAM2 mask가 있는 경우)
+            # bbox 갱신
             if sam2_result is not None and sam2_result.bbox_roi is not None and fusion.sensor_used == "SAM2":
+                # SAM2 mask 기반 정밀 bbox
                 full_bbox = roi_mgr.to_full_coords_bbox(sam2_result.bbox_roi, roi)
                 tr.bbox = full_bbox
                 tr.area = sam2_result.area
+            elif fusion.do_kalman_update and fusion.center is not None:
+                # SAM2 미사용 시 center 기반 bbox 유지 (기존 크기 보존)
+                fcx, fcy = fusion.center
+                if tr.bbox is not None:
+                    bw = tr.bbox[2] - tr.bbox[0]
+                    bh = tr.bbox[3] - tr.bbox[1]
+                else:
+                    bw, bh = 60, 60
+                half_w, half_h = bw // 2, bh // 2
+                tr.bbox = (int(fcx - half_w), int(fcy - half_h),
+                           int(fcx + half_w), int(fcy + half_h))
 
             # g) Head 추정
             velocity = tr.kf.get_velocity()
@@ -221,9 +239,17 @@ def run_pipeline(
             new_state = state_machine.update(tr, fusion, frame_idx, arena_rect, frame_size)
             tr.state = new_state
 
-            # i) Template update (좋은 품질일 때만)
-            if fusion.quality_score > 0:
+            # i) Template update (SAM2 융합 성공 시에만 — drift-lock 방지)
+            if fusion.sensor_used == "SAM2" and fusion.quality_score >= 0.7:
                 tpl_sensor.update_template(tr, roi, crop_gray, fusion.quality_score)
+
+            # i-2) KLT reinit: SAM2 성공인데 KLT가 크게 벗어나면 feature 재초기화
+            if fusion.sensor_used == "SAM2" and klt_result is not None:
+                from math import sqrt
+                klt_sam2_dist = sqrt((klt_result.center[0] - fusion.center[0])**2 +
+                                     (klt_result.center[1] - fusion.center[1])**2)
+                if klt_sam2_dist > roi_size_val * 0.15:
+                    klt_sensor.initialize(tr, roi, crop_bgr, crop_gray)
 
             # j) Immobility check
             state_machine.check_immobility(tr, fps)
@@ -236,6 +262,16 @@ def run_pipeline(
                     "quality": fusion.quality_score,
                 })
 
+            # l) 디버그 정보 수집
+            debug_infos[tr.id] = DebugInfo(
+                track_id=tr.id,
+                roi=(roi.x0, roi.y0, roi.x1, roi.y1),
+                pred_center=pred_center,
+                sam2_center=sam2_result.center if sam2_result else None,
+                tpl_center=tpl_result.center if tpl_result else None,
+                klt_center=klt_result.center if klt_result else None,
+            )
+
         # --- Merge detection ---
         merge_events = state_machine.check_merges(tracks)
         if event_writer:
@@ -246,7 +282,7 @@ def run_pipeline(
         artifacts.write_frame(frame_idx, tracks, frame_size=frame_size, fps=fps)
 
         if overlay_writer is not None:
-            overlay = draw_overlay(frame_bgr.copy(), tracks, frame_idx, arena_rect)
+            overlay = draw_overlay(frame_bgr.copy(), tracks, frame_idx, arena_rect, debug_infos)
             overlay_writer.write(overlay)
 
     # --- 정리 ---

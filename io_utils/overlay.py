@@ -1,7 +1,8 @@
 # io_utils/overlay.py
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 
@@ -20,11 +21,23 @@ _STATE_COLORS = {
 }
 
 
+@dataclass
+class DebugInfo:
+    """디버그 시각화용 센서 정보."""
+    track_id: int
+    roi: Optional[Tuple[int, int, int, int]] = None  # (x0, y0, x1, y1)
+    pred_center: Optional[Tuple[float, float]] = None
+    sam2_center: Optional[Tuple[float, float]] = None
+    tpl_center: Optional[Tuple[float, float]] = None
+    klt_center: Optional[Tuple[float, float]] = None
+
+
 def draw_overlay(
     frame_bgr,
     tracks: List[Track],
     frame_idx: int,
     arena_rect: Optional[Tuple[int, int, int, int]] = None,
+    debug_infos: Optional[Dict[int, DebugInfo]] = None,
 ):
     """프레임에 트래킹 정보 오버레이."""
 
@@ -36,7 +49,38 @@ def draw_overlay(
     for tr in tracks:
         color = _STATE_COLORS.get(tr.state, (200, 200, 200))
 
-        # bbox
+        # 디버그 정보 그리기
+        if debug_infos and tr.id in debug_infos:
+            dbg = debug_infos[tr.id]
+
+            # ROI (하늘색 사각형)
+            if dbg.roi:
+                rx0, ry0, rx1, ry1 = dbg.roi
+                cv2.rectangle(frame_bgr, (rx0, ry0), (rx1, ry1), (255, 255, 0), 2)
+
+            # PRED center (흰색 X)
+            if dbg.pred_center:
+                px, py = int(dbg.pred_center[0]), int(dbg.pred_center[1])
+                cv2.drawMarker(frame_bgr, (px, py), (255, 255, 255),
+                              cv2.MARKER_TILTED_CROSS, 12, 2)
+
+            # SAM2 center (녹색 원)
+            if dbg.sam2_center:
+                sx, sy = int(dbg.sam2_center[0]), int(dbg.sam2_center[1])
+                cv2.circle(frame_bgr, (sx, sy), 8, (0, 255, 0), 2)
+
+            # TPL center (파란색 사각형)
+            if dbg.tpl_center:
+                tx, ty = int(dbg.tpl_center[0]), int(dbg.tpl_center[1])
+                cv2.rectangle(frame_bgr, (tx-6, ty-6), (tx+6, ty+6), (255, 0, 0), 2)
+
+            # KLT center (빨간색 마름모)
+            if dbg.klt_center:
+                kx, ky = int(dbg.klt_center[0]), int(dbg.klt_center[1])
+                cv2.drawMarker(frame_bgr, (kx, ky), (0, 0, 255),
+                              cv2.MARKER_DIAMOND, 10, 2)
+
+        # bbox (상태 색상)
         if tr.bbox is not None:
             x0, y0, x1, y1 = tr.bbox
             cv2.rectangle(frame_bgr, (x0, y0), (x1, y1), color, 1)
@@ -45,16 +89,6 @@ def draw_overlay(
         cx, cy = tr.center()
         if cx is not None and cy is not None:
             cv2.circle(frame_bgr, (int(cx), int(cy)), 4, color, -1)
-
-            # head arrow
-            if tr.last_head is not None:
-                hx, hy = tr.last_head
-                cv2.arrowedLine(
-                    frame_bgr,
-                    (int(cx), int(cy)),
-                    (int(hx), int(hy)),
-                    (0, 0, 255), 2, tipLength=0.3,
-                )
 
         # text
         txt = f"id={tr.id} {tr.state.value}"

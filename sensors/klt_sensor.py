@@ -29,6 +29,7 @@ class KltSensor(Sensor):
         self.max_level = int(kcfg.get("max_level", 3))
         self.min_valid_points = int(kcfg.get("min_valid_points", 10))
         self.measurement_r = float(kcfg.get("measurement_noise_r", 25.0))
+        self.fb_err_thresh = float(kcfg.get("fb_error_thresh", 2.0))
 
         self._lk_params = dict(
             winSize=(self.win_size, self.win_size),
@@ -108,11 +109,11 @@ class KltSensor(Sensor):
         valid &= (status_f.ravel() == 1)
         if back_pts is not None and status_b is not None:
             valid &= (status_b.ravel() == 1)
-            # round-trip error < 1px
+            # round-trip error < threshold
             fb_err = np.linalg.norm(
                 prev_pts.reshape(-1, 2) - back_pts.reshape(-1, 2), axis=1
             )
-            valid &= (fb_err < 1.0)
+            valid &= (fb_err < self.fb_err_thresh)
 
         good_pts = next_pts.reshape(-1, 2)[valid]
 
