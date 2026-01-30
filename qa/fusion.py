@@ -121,13 +121,21 @@ def fuse(
             base_quality = min(1.0, sam2.confidence if sam2 else 0.5)
             adjusted_quality = max(0.0, base_quality - area_penalty)
 
+            # quality가 낮으면 UNCERTAIN으로 전이 (소프트 의심 신호)
+            # 이렇게 하면 면적 급변 등 의심스러운 상황에서 재획득 루틴을 트리거할 수 있음
+            quality_uncertain_th = float(qa.get("quality_uncertain_threshold", 0.7))
+            if adjusted_quality >= quality_uncertain_th:
+                hint = TrackState.ACTIVE
+            else:
+                hint = TrackState.UNCERTAIN
+
             return FusionResult(
                 center=c_sam2,
                 sensor_used="SAM2",
                 quality_score=adjusted_quality,
                 do_kalman_update=True,
                 measurement_r=sam2_r,
-                state_hint=TrackState.ACTIVE,
+                state_hint=hint,
                 debug=debug,
             )
 
