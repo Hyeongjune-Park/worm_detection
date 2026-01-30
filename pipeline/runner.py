@@ -176,6 +176,8 @@ def run_pipeline(
             # d) Fusion + QA
             is_merged = (tr.state == TrackState.MERGED)
             roi_size_val = float(roi.x1 - roi.x0)
+            # 이전 프레임 면적 (연속성 페널티용)
+            prev_area = sam2_sensor._prev_areas.get(tr.id)
             fusion = fuse(
                 pred_center=pred_center,
                 sam2=sam2_result,
@@ -187,6 +189,7 @@ def run_pipeline(
                 tpl_r=tpl_r,
                 klt_r=klt_r,
                 is_merged=is_merged,
+                prev_area=prev_area,
             )
 
             # Fix 7: SAM2 QA 통과 시 prev_mask 캐시 확정

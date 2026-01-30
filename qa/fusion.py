@@ -40,6 +40,7 @@ def fuse(
     tpl_r: float = 25.0,
     klt_r: float = 25.0,
     is_merged: bool = False,
+    prev_area: Optional[int] = None,  # 이전 프레임 SAM2 면적 (연속성 검사용)
 ) -> FusionResult:
     """
     다중 센서 교차검증 + 융합.
@@ -89,6 +90,21 @@ def fuse(
     # --- Fix 3: MERGED 상태 → SAM2 불신 (붙어 있으면 하나로 나옴) ---
     sam2_trustable = not is_merged
 
+    # --- 면적 연속성 페널티 계산 (소프트 의심 신호) ---
+    # 하드 게이트가 아닌 quality 감점으로만 사용
+    area_penalty = 0.0
+    curr_area = sam2.area if sam2 is not None else None
+    if prev_area is not None and curr_area is not None and prev_area > 0:
+        area_ratio = curr_area / prev_area
+        # 0.5배 ~ 2배 범위를 벗어나면 페널티 증가
+        if area_ratio < 0.5:
+            area_penalty = min((0.5 - area_ratio) * 0.8, 0.4)  # 너무 작으면 감점 (최대 0.4)
+        elif area_ratio > 2.0:
+            area_penalty = min((area_ratio - 2.0) * 0.4, 0.4)  # 너무 크면 감점 (최대 0.4)
+    debug["area_penalty"] = area_penalty
+    debug["curr_area"] = curr_area if curr_area is not None else -1
+    debug["prev_area"] = prev_area if prev_area is not None else -1
+
     # --- Case A: SAM2 신뢰 (MERGED가 아닐 때만) ---
     # 2-of-3 교차검증: SAM2 + (pred 필수) + (tpl OR klt 중 하나 이상 동의 또는 둘 다 None)
     if c_sam2 is not None and sam2_trustable:
@@ -101,10 +117,14 @@ def fuse(
         secondary_ok = tpl_ok or klt_ok
 
         if pred_ok and secondary_ok and border_ok:
+            # 기본 confidence에서 면적 연속성 페널티 적용
+            base_quality = min(1.0, sam2.confidence if sam2 else 0.5)
+            adjusted_quality = max(0.0, base_quality - area_penalty)
+
             return FusionResult(
                 center=c_sam2,
                 sensor_used="SAM2",
-                quality_score=min(1.0, sam2.confidence if sam2 else 0.5),
+                quality_score=adjusted_quality,
                 do_kalman_update=True,
                 measurement_r=sam2_r,
                 state_hint=TrackState.ACTIVE,
