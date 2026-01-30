@@ -40,8 +40,9 @@ class Sam2Sensor(Sensor):
         # prev_mask 캐시 (track_id → (mask_u8, center_full))
         self._prev_masks: Dict[int, np.ndarray] = {}
         self._prev_centers: Dict[int, Tuple[float, float]] = {}
+        self._prev_areas: Dict[int, int] = {}  # 이전 프레임 면적 (연속성 검사용)
         # 임시 저장 (QA 확정 전)
-        self._pending: Dict[int, Tuple[np.ndarray, Tuple[float, float]]] = {}
+        self._pending: Dict[int, Tuple[np.ndarray, Tuple[float, float], int]] = {}  # (mask, center, area)
 
     def _init_sam2(self):
         sam2_dir = os.path.abspath("sam2")
@@ -155,28 +156,110 @@ class Sam2Sensor(Sensor):
             multimask_output=True,
         )
 
-        best_idx = int(np.argmax(scores))
+        # 복합 점수 기반 mask 선택 (score만이 아닌 여러 요소 고려)
+        best_idx = self._select_best_mask(
+            masks, scores,
+            pred_center_roi=(cx_roi, cy_roi),
+            prev_area=self._prev_areas.get(track.id),
+            crop_shape=(h, w)
+        )
         mask = masks[best_idx]
         mask_u8 = (mask.astype(np.uint8)) * 255
+        area = int(np.count_nonzero(mask_u8))
 
-        if np.count_nonzero(mask_u8) == 0:
+        if area == 0:
             return None
 
         result = self._analyze_mask(mask_u8, roi, (h, w))
 
         # pending에 임시 저장 (QA 좋으면 cache_good_result() 호출)
         if result.center is not None:
-            self._pending[track.id] = (mask_u8, result.center)
+            self._pending[track.id] = (mask_u8, result.center, area)
 
         return result
 
+    def _select_best_mask(
+        self,
+        masks: np.ndarray,
+        scores: np.ndarray,
+        pred_center_roi: Tuple[float, float],
+        prev_area: Optional[int],
+        crop_shape: Tuple[int, int]
+    ) -> int:
+        """
+        복합 점수 기반 mask 선택.
+
+        기존: argmax(scores) - SAM2 점수만 고려
+        개선: score + pred 근접성 + 면적 일관성 + border_touch 종합 고려
+
+        이렇게 하면 "점수만 높고 엉뚱한 mask"가 선택되는 것을 방지.
+        하드 거부가 아닌 소프트 스코어링이므로 오탐 위험이 낮음.
+        """
+        h, w = crop_shape
+        cx_pred, cy_pred = pred_center_roi
+
+        candidates = []
+        for i, (mask, score) in enumerate(zip(masks, scores)):
+            mask_u8 = mask.astype(np.uint8)
+            area = int(np.count_nonzero(mask_u8))
+
+            if area == 0:
+                candidates.append((float('-inf'), i))
+                continue
+
+            # 1. SAM2 score (0~1, 높을수록 좋음)
+            sam2_score = float(score)
+
+            # 2. Center 계산 및 pred 근접성 (가까울수록 좋음)
+            ys, xs = np.where(mask_u8 > 0)
+            cx_mask = float(np.mean(xs))
+            cy_mask = float(np.mean(ys))
+
+            dist_to_pred = np.sqrt((cx_mask - cx_pred)**2 + (cy_mask - cy_pred)**2)
+            roi_diag = np.sqrt(h**2 + w**2)
+            dist_penalty = min(dist_to_pred / roi_diag, 1.0)  # 정규화 (0~1)
+
+            # 3. 면적 일관성 (이전 면적과 비슷할수록 좋음)
+            area_penalty = 0.0
+            if prev_area is not None and prev_area > 0:
+                area_ratio = area / prev_area
+                # 0.5배 ~ 2배 범위를 벗어나면 페널티 증가
+                if area_ratio < 0.5:
+                    area_penalty = (0.5 - area_ratio) * 0.5  # 너무 작으면 감점
+                elif area_ratio > 2.0:
+                    area_penalty = (area_ratio - 2.0) * 0.3  # 너무 크면 감점
+                area_penalty = min(area_penalty, 0.5)  # 최대 0.5 감점
+
+            # 4. Border touch (경계 접촉 비율, 낮을수록 좋음)
+            on_border = (
+                (xs <= 1) | (xs >= w - 2) |
+                (ys <= 1) | (ys >= h - 2)
+            )
+            border_touch = float(np.sum(on_border)) / max(1, area)
+
+            # 복합 점수 계산
+            # 가중치: SAM2 점수 기본, 거리/면적/경계는 페널티로 적용
+            combined = (
+                sam2_score * 1.0           # SAM2 점수 (0~1)
+                - dist_penalty * 0.3       # 거리 페널티 (최대 -0.3)
+                - area_penalty             # 면적 페널티 (최대 -0.5)
+                - border_touch * 0.3       # 경계 페널티 (최대 -0.3)
+            )
+
+            candidates.append((combined, i))
+
+        # 가장 높은 복합 점수의 mask 선택
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+
     def cache_good_result(self, track_id: int) -> None:
-        """QA 통과 시 호출 → prev_mask/center 확정 캐시."""
+        """QA 통과 시 호출 → prev_mask/center/area 확정 캐시."""
         pending = self._pending.pop(track_id, None)
         if pending is not None:
-            mask_u8, center = pending
+            mask_u8, center, area = pending
             self._prev_masks[track_id] = mask_u8
             self._prev_centers[track_id] = center
+            self._prev_areas[track_id] = area
 
     def _analyze_mask(self, mask_u8: np.ndarray, roi: RoiWindow,
                       crop_shape: Tuple[int, int]) -> SensorResult:
