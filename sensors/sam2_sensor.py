@@ -98,20 +98,25 @@ class Sam2Sensor(Sensor):
 
     def measure(self, track: Track, roi: RoiWindow,
                 crop_bgr: np.ndarray, crop_gray: np.ndarray,
-                frame_idx: int) -> Optional[SensorResult]:
+                frame_idx: int, box_expansion: float = 1.0) -> Optional[SensorResult]:
+        """
+        Args:
+            box_expansion: Box prompt 확장 배율 (1.0 = 기본, 1.5 = 1.5배 확장)
+                          UNCERTAIN/OCCLUDED 상태에서 재획득을 위해 확장
+        """
         if not self.enabled or not self._available:
             return None
         if self.update_every_n > 1 and (frame_idx % self.update_every_n) != 0:
             return None
 
         try:
-            return self._measure_sam2(track, roi, crop_bgr)
+            return self._measure_sam2(track, roi, crop_bgr, box_expansion)
         except Exception as e:
             print(f"[SAM2] measure exception track={track.id} frame={frame_idx}: {e}")
             return None
 
     def _measure_sam2(self, track: Track, roi: RoiWindow,
-                      crop_bgr: np.ndarray) -> Optional[SensorResult]:
+                      crop_bgr: np.ndarray, box_expansion: float = 1.0) -> Optional[SensorResult]:
         h, w = crop_bgr.shape[:2]
 
         # Box prompt: Kalman 예측 위치 중심으로 생성
@@ -120,13 +125,16 @@ class Sam2Sensor(Sensor):
         cx_roi = pred_x - roi.x0
         cy_roi = pred_y - roi.y0
 
-        # Box 크기: seed bbox 크기를 상한으로 사용
-        # 사용자가 시드 지정 시 벌레 전체를 감싸도록 그리므로 그 크기가 상한
+        # Box 크기: seed bbox 크기 기반 (box_expansion으로 확장 가능)
+        # 사용자가 시드 지정 시 벌레 전체를 감싸도록 그리므로 그 크기가 기준
+        # UNCERTAIN/OCCLUDED 상태에서는 box_expansion=1.5로 확장하여 재획득 시도
         if track.seed_bbox_size is not None:
             seed_w, seed_h = track.seed_bbox_size
-            half_w, half_h = seed_w // 2, seed_h // 2
+            half_w = int(seed_w * box_expansion) // 2
+            half_h = int(seed_h * box_expansion) // 2
         else:
-            half_w, half_h = 50, 50  # fallback: 100x100
+            half_w = int(50 * box_expansion)  # fallback: 100x100 * expansion
+            half_h = int(50 * box_expansion)
 
         box = np.array([
             cx_roi - half_w, cy_roi - half_h,

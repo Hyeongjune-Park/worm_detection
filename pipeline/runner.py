@@ -160,16 +160,47 @@ def run_pipeline(
             tr.update_speed(fps)
             pred_center = tr.kf.get_position()
 
-            # b) ROI
-            roi = roi_mgr.make_roi(pred_center[0], pred_center[1], frame_size)
+            # b) ROI 확장 계산
+            # (1) 상태 기반: UNCERTAIN/OCCLUDED에서는 확장하여 재획득 시도
+            if tr.state in (TrackState.UNCERTAIN, TrackState.OCCLUDED):
+                state_expansion = 1.5
+            else:
+                state_expansion = 1.0
+
+            # (2) 속도 기반: 빠르게 움직이면 ROI 미리 확장 (벗어나기 전에 대응)
+            speed_expansion = 1.0
+            if tr.last_center is not None:
+                dx = pred_center[0] - tr.last_center[0]
+                dy = pred_center[1] - tr.last_center[1]
+                dist = (dx * dx + dy * dy) ** 0.5
+                roi_base = roi_mgr.base_size
+                r = dist / roi_base  # 이동량 / ROI 크기 비율
+                if r > 0.40:
+                    speed_expansion = 2.0
+                elif r > 0.25:
+                    speed_expansion = 1.5
+
+            # (3) 쿨다운 히스테리시스: 확장 후 천천히 축소 (pumping 방지)
+            # 확장이 필요하면 쿨다운 설정, 쿨다운 중에는 최소 1.5배 유지
+            desired_expansion = max(state_expansion, speed_expansion)
+            if desired_expansion > 1.0:
+                tr.expansion_cooldown = 5  # 5프레임 동안 확장 유지
+            elif tr.expansion_cooldown > 0:
+                tr.expansion_cooldown -= 1
+                desired_expansion = max(desired_expansion, 1.5)  # 쿨다운 중 최소 1.5배
+
+            expansion = desired_expansion
+            roi = roi_mgr.make_roi(pred_center[0], pred_center[1], frame_size,
+                                   expansion_factor=expansion)
             crop_bgr = roi_mgr.crop(frame_bgr, roi)
             crop_gray = roi_mgr.crop(frame_gray, roi)
 
             if crop_bgr.size == 0 or crop_gray.size == 0:
                 continue
 
-            # c) 센서 측정
-            sam2_result = sam2_sensor.measure(tr, roi, crop_bgr, crop_gray, frame_idx)
+            # c) 센서 측정 (UNCERTAIN/OCCLUDED에서는 box prompt도 확장)
+            sam2_result = sam2_sensor.measure(tr, roi, crop_bgr, crop_gray, frame_idx,
+                                              box_expansion=expansion)
             tpl_result = tpl_sensor.measure(tr, roi, crop_bgr, crop_gray, frame_idx)
             klt_result = klt_sensor.measure(tr, roi, crop_bgr, crop_gray, frame_idx)
 
@@ -273,6 +304,7 @@ def run_pipeline(
                 sam2_center=sam2_result.center if sam2_result else None,
                 tpl_center=tpl_result.center if tpl_result else None,
                 klt_center=klt_result.center if klt_result else None,
+                sam2_mask=sam2_result.mask if sam2_result else None,
             )
 
         # --- Merge detection ---
