@@ -198,13 +198,17 @@ def _fuse_case_a_split(
     """[F1=ON] ACTIVE/REACQUIRE 모드 분리 SAM2 채택 로직."""
 
     if not is_reacquire:
-        # --- ACTIVE 모드: 엄격 (consensus + area 체크 필수) ---
-        can_adopt = border_ok and shape_ok and has_consensus and area_check_available
+        # --- ACTIVE 모드: 엄격 (consensus 필수, area 없으면 소프트 페널티) ---
+        can_adopt = border_ok and shape_ok and has_consensus
         if not can_adopt:
             return None
 
         base_quality = min(1.0, sam2.confidence if sam2 else 0.5)
         adjusted_quality = max(0.0, base_quality - area_penalty)
+
+        # area_check 미가용 시 소프트 페널티 (순환 의존 방지)
+        if not area_check_available:
+            adjusted_quality = max(0.0, adjusted_quality - 0.15)
 
         # [F2] pred 거리 페널티
         pred_penalty, effective_r = _apply_pred_penalty(

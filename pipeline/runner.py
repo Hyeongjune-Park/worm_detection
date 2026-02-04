@@ -280,7 +280,8 @@ def run_pipeline(
                         area_ratio = sam2_result.area / prev_area
                         area_ok = 0.3 < area_ratio < 3.0
                     else:
-                        area_ok = False
+                        # prev_area 없으면 area 체크 스킵 (순환 의존 방지)
+                        area_ok = True
                     has_consensus_bbox = fusion.debug.get("has_consensus", 0.0) > 0.5
                     if is_active:
                         sam2_bbox_ok = border_ok and area_ok and has_consensus_bbox
