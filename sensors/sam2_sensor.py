@@ -23,13 +23,14 @@ class Sam2Sensor(Sensor):
     다음 프레임 point prompt로 사용하여 안정성 향상.
     """
 
-    def __init__(self, cfg: Dict[str, Any]):
+    def __init__(self, cfg: Dict[str, Any], toggles=None):
         scfg = cfg.get("sensors", {}).get("sam2", {})
         self.enabled = bool(scfg.get("enabled", True))
         self.model_type = str(scfg.get("model_type", "sam2_hiera_tiny"))
         self.ckpt = str(scfg.get("checkpoint_path", ""))
         self.update_every_n = int(scfg.get("update_every_n", 1))
         self.measurement_r = float(scfg.get("measurement_noise_r", 10.0))
+        self._toggles = toggles
 
         self._available = False
         self._predictor = None
@@ -164,13 +165,25 @@ class Sam2Sensor(Sensor):
             multimask_output=True,
         )
 
-        # 복합 점수 기반 mask 선택 (score만이 아닌 여러 요소 고려)
-        best_idx = self._select_best_mask(
-            masks, scores,
-            pred_center_roi=(cx_roi, cy_roi),
-            prev_area=self._prev_areas.get(track.id),
-            crop_shape=(h, w)
-        )
+        # [S1] 마스크 선택: 복합 점수 vs argmax
+        if self._toggles is not None and self._toggles.composite_mask_selection:
+            best_idx = self._select_best_mask(
+                masks, scores,
+                pred_center_roi=(cx_roi, cy_roi),
+                prev_area=self._prev_areas.get(track.id),
+                crop_shape=(h, w)
+            )
+        elif self._toggles is None:
+            # toggles 미전달 시 기존 동작 유지 (복합 점수)
+            best_idx = self._select_best_mask(
+                masks, scores,
+                pred_center_roi=(cx_roi, cy_roi),
+                prev_area=self._prev_areas.get(track.id),
+                crop_shape=(h, w)
+            )
+        else:
+            # [S1=OFF] BASE: argmax(SAM2 scores)
+            best_idx = int(np.argmax(scores))
         mask = masks[best_idx]
         mask_u8 = (mask.astype(np.uint8)) * 255
         area = int(np.count_nonzero(mask_u8))
@@ -328,12 +341,12 @@ class Sam2Sensor(Sensor):
         return (ep1, ep2)
 
 
-def build_sam2_sensor(cfg: Dict[str, Any]) -> Sam2Sensor:
+def build_sam2_sensor(cfg: Dict[str, Any], toggles=None) -> Sam2Sensor:
     """
     SAM2 센서 생성. 실패해도 Sam2Sensor 반환 (available=False → measure()는 None).
     MotionMask fallback 제거: TPL+KLT+Kalman만으로 운용.
     """
-    sensor = Sam2Sensor(cfg)
+    sensor = Sam2Sensor(cfg, toggles=toggles)
     if sensor.available:
         return sensor
     print(f"[SAM2] not available ({sensor._init_error}) -> TPL+KLT+Kalman only")
