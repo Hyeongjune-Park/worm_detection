@@ -90,6 +90,41 @@ head:
   min_movement_px: 2.0
   smoothing_window: 5
 
+# ======================================================================
+# Feature Toggles (기능 토글)
+# 2026-01-27 base 이후 추가된 개선 기능을 개별 ON/OFF.
+# OFF = base 동작 복원. A/B 테스트를 위해 조합 변경 가능.
+# ======================================================================
+toggles:
+  # --- Fusion (qa/fusion.py) ---
+  active_reacquire_split: true       # F1: ACTIVE(엄격) vs REACQUIRE(관대) 모드 분리
+  soft_pred_penalty: false           # F2: pred 거리 소프트 페널티 (위험, 기본 OFF)
+  strict_consensus: true             # F3: 엄격한 consensus — None=불합의 (버그수정)
+  area_continuity_penalty: false     # F4: 면적 연속성 quality 감점 (기본 OFF)
+  reacquire_active_recovery: true    # F5: REACQUIRE→ACTIVE 복귀 경로
+
+  # --- Pipeline / ROI (pipeline/runner.py) ---
+  speed_roi_expansion: false         # P1: 속도 기반 ROI 확장 (위험, 기본 OFF)
+  state_roi_expansion: false         # P2: UNCERTAIN/OCCLUDED ROI 1.25x (기본 OFF)
+  expansion_cooldown: false          # P3: ROI 확장 쿨다운 5프레임 (기본 OFF)
+  sam2_bbox_sync: false              # P4: SAM2 bbox 독립 동기화 (위험, 기본 OFF)
+  reacquire_box_expansion: false     # P5: REACQUIRE 시 box prompt 확장 (기본 OFF)
+
+  # --- Sensor ---
+  composite_mask_selection: true     # S1: SAM2 복합 점수 마스크 선택
+  template_update_gating: true       # S2: SAM2 quality >= 0.7일 때만 TPL 갱신
+  klt_divergence_reinit: true        # S3: KLT-SAM2 발산 시 KLT 재초기화
+  sam2_mask_caching: true            # S4: SAM2 QA 통과 시 결과 캐싱
+
+  # --- Shape Quality ---
+  shape_quality_gate: true            # SH1: ShapeStats 기반 bbox HOLD / cache 차단 / quality 감점
+
+  # --- Kalman ---
+  velocity_decay_on_predict: true    # K1: predict-only 시 velocity 감쇠 (0.5x)
+
+  # --- State Machine ---
+  occluded_to_uncertain_recovery: false  # SM1: OCCLUDED→UNCERTAIN 복귀 허용 (기본 OFF)
+
 # 모션 검출 (보조/복구 힌트용, 주 센서 아님)
 detection:
   bg:

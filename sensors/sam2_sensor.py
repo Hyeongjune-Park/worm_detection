@@ -23,13 +23,14 @@ class Sam2Sensor(Sensor):
     다음 프레임 point prompt로 사용하여 안정성 향상.
     """
 
-    def __init__(self, cfg: Dict[str, Any]):
+    def __init__(self, cfg: Dict[str, Any], toggles=None):
         scfg = cfg.get("sensors", {}).get("sam2", {})
         self.enabled = bool(scfg.get("enabled", True))
         self.model_type = str(scfg.get("model_type", "sam2_hiera_tiny"))
         self.ckpt = str(scfg.get("checkpoint_path", ""))
         self.update_every_n = int(scfg.get("update_every_n", 1))
         self.measurement_r = float(scfg.get("measurement_noise_r", 10.0))
+        self._toggles = toggles
 
         self._available = False
         self._predictor = None
@@ -40,8 +41,9 @@ class Sam2Sensor(Sensor):
         # prev_mask 캐시 (track_id → (mask_u8, center_full))
         self._prev_masks: Dict[int, np.ndarray] = {}
         self._prev_centers: Dict[int, Tuple[float, float]] = {}
+        self._prev_areas: Dict[int, int] = {}  # 이전 프레임 면적 (연속성 검사용)
         # 임시 저장 (QA 확정 전)
-        self._pending: Dict[int, Tuple[np.ndarray, Tuple[float, float]]] = {}
+        self._pending: Dict[int, Tuple[np.ndarray, Tuple[float, float], int]] = {}  # (mask, center, area)
 
     def _init_sam2(self):
         sam2_dir = os.path.abspath("sam2")
@@ -97,20 +99,25 @@ class Sam2Sensor(Sensor):
 
     def measure(self, track: Track, roi: RoiWindow,
                 crop_bgr: np.ndarray, crop_gray: np.ndarray,
-                frame_idx: int) -> Optional[SensorResult]:
+                frame_idx: int, box_expansion: float = 1.0) -> Optional[SensorResult]:
+        """
+        Args:
+            box_expansion: Box prompt 확장 배율 (1.0 = 기본, 1.5 = 1.5배 확장)
+                          UNCERTAIN/OCCLUDED 상태에서 재획득을 위해 확장
+        """
         if not self.enabled or not self._available:
             return None
         if self.update_every_n > 1 and (frame_idx % self.update_every_n) != 0:
             return None
 
         try:
-            return self._measure_sam2(track, roi, crop_bgr)
+            return self._measure_sam2(track, roi, crop_bgr, box_expansion)
         except Exception as e:
             print(f"[SAM2] measure exception track={track.id} frame={frame_idx}: {e}")
             return None
 
     def _measure_sam2(self, track: Track, roi: RoiWindow,
-                      crop_bgr: np.ndarray) -> Optional[SensorResult]:
+                      crop_bgr: np.ndarray, box_expansion: float = 1.0) -> Optional[SensorResult]:
         h, w = crop_bgr.shape[:2]
 
         # Box prompt: Kalman 예측 위치 중심으로 생성
@@ -119,13 +126,16 @@ class Sam2Sensor(Sensor):
         cx_roi = pred_x - roi.x0
         cy_roi = pred_y - roi.y0
 
-        # Box 크기: seed bbox 크기를 상한으로 사용
-        # 사용자가 시드 지정 시 벌레 전체를 감싸도록 그리므로 그 크기가 상한
+        # Box 크기: seed bbox 크기 기반 (box_expansion으로 확장 가능)
+        # 사용자가 시드 지정 시 벌레 전체를 감싸도록 그리므로 그 크기가 기준
+        # UNCERTAIN/OCCLUDED 상태에서는 box_expansion=1.5로 확장하여 재획득 시도
         if track.seed_bbox_size is not None:
             seed_w, seed_h = track.seed_bbox_size
-            half_w, half_h = seed_w // 2, seed_h // 2
+            half_w = int(seed_w * box_expansion) // 2
+            half_h = int(seed_h * box_expansion) // 2
         else:
-            half_w, half_h = 50, 50  # fallback: 100x100
+            half_w = int(50 * box_expansion)  # fallback: 100x100 * expansion
+            half_h = int(50 * box_expansion)
 
         box = np.array([
             cx_roi - half_w, cy_roi - half_h,
@@ -155,28 +165,122 @@ class Sam2Sensor(Sensor):
             multimask_output=True,
         )
 
-        best_idx = int(np.argmax(scores))
+        # [S1] 마스크 선택: 복합 점수 vs argmax
+        if self._toggles is not None and self._toggles.composite_mask_selection:
+            best_idx = self._select_best_mask(
+                masks, scores,
+                pred_center_roi=(cx_roi, cy_roi),
+                prev_area=self._prev_areas.get(track.id),
+                crop_shape=(h, w)
+            )
+        elif self._toggles is None:
+            # toggles 미전달 시 기존 동작 유지 (복합 점수)
+            best_idx = self._select_best_mask(
+                masks, scores,
+                pred_center_roi=(cx_roi, cy_roi),
+                prev_area=self._prev_areas.get(track.id),
+                crop_shape=(h, w)
+            )
+        else:
+            # [S1=OFF] BASE: argmax(SAM2 scores)
+            best_idx = int(np.argmax(scores))
         mask = masks[best_idx]
         mask_u8 = (mask.astype(np.uint8)) * 255
+        area = int(np.count_nonzero(mask_u8))
 
-        if np.count_nonzero(mask_u8) == 0:
+        if area == 0:
             return None
 
         result = self._analyze_mask(mask_u8, roi, (h, w))
 
         # pending에 임시 저장 (QA 좋으면 cache_good_result() 호출)
         if result.center is not None:
-            self._pending[track.id] = (mask_u8, result.center)
+            self._pending[track.id] = (mask_u8, result.center, area)
 
         return result
 
+    def _select_best_mask(
+        self,
+        masks: np.ndarray,
+        scores: np.ndarray,
+        pred_center_roi: Tuple[float, float],
+        prev_area: Optional[int],
+        crop_shape: Tuple[int, int]
+    ) -> int:
+        """
+        복합 점수 기반 mask 선택.
+
+        기존: argmax(scores) - SAM2 점수만 고려
+        개선: score + pred 근접성 + 면적 일관성 + border_touch 종합 고려
+
+        이렇게 하면 "점수만 높고 엉뚱한 mask"가 선택되는 것을 방지.
+        하드 거부가 아닌 소프트 스코어링이므로 오탐 위험이 낮음.
+        """
+        h, w = crop_shape
+        cx_pred, cy_pred = pred_center_roi
+
+        candidates = []
+        for i, (mask, score) in enumerate(zip(masks, scores)):
+            mask_u8 = mask.astype(np.uint8)
+            area = int(np.count_nonzero(mask_u8))
+
+            if area == 0:
+                candidates.append((float('-inf'), i))
+                continue
+
+            # 1. SAM2 score (0~1, 높을수록 좋음)
+            sam2_score = float(score)
+
+            # 2. Center 계산 및 pred 근접성 (가까울수록 좋음)
+            ys, xs = np.where(mask_u8 > 0)
+            cx_mask = float(np.mean(xs))
+            cy_mask = float(np.mean(ys))
+
+            dist_to_pred = np.sqrt((cx_mask - cx_pred)**2 + (cy_mask - cy_pred)**2)
+            roi_diag = np.sqrt(h**2 + w**2)
+            dist_penalty = min(dist_to_pred / roi_diag, 1.0)  # 정규화 (0~1)
+
+            # 3. 면적 일관성 (이전 면적과 비슷할수록 좋음)
+            area_penalty = 0.0
+            if prev_area is not None and prev_area > 0:
+                area_ratio = area / prev_area
+                # 0.5배 ~ 2배 범위를 벗어나면 페널티 증가
+                if area_ratio < 0.5:
+                    area_penalty = (0.5 - area_ratio) * 0.5  # 너무 작으면 감점
+                elif area_ratio > 2.0:
+                    area_penalty = (area_ratio - 2.0) * 0.3  # 너무 크면 감점
+                area_penalty = min(area_penalty, 0.5)  # 최대 0.5 감점
+
+            # 4. Border touch (경계 접촉 비율, 낮을수록 좋음)
+            on_border = (
+                (xs <= 1) | (xs >= w - 2) |
+                (ys <= 1) | (ys >= h - 2)
+            )
+            border_touch = float(np.sum(on_border)) / max(1, area)
+
+            # 복합 점수 계산
+            # 가중치: SAM2 점수 기본, 거리/면적/경계는 페널티로 적용
+            combined = (
+                sam2_score * 1.0           # SAM2 점수 (0~1)
+                - dist_penalty * 0.3       # 거리 페널티 (최대 -0.3)
+                - area_penalty             # 면적 페널티 (최대 -0.5)
+                - border_touch * 0.3       # 경계 페널티 (최대 -0.3)
+            )
+
+            candidates.append((combined, i))
+
+        # 가장 높은 복합 점수의 mask 선택
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+
     def cache_good_result(self, track_id: int) -> None:
-        """QA 통과 시 호출 → prev_mask/center 확정 캐시."""
+        """QA 통과 시 호출 → prev_mask/center/area 확정 캐시."""
         pending = self._pending.pop(track_id, None)
         if pending is not None:
-            mask_u8, center = pending
+            mask_u8, center, area = pending
             self._prev_masks[track_id] = mask_u8
             self._prev_centers[track_id] = center
+            self._prev_areas[track_id] = area
 
     def _analyze_mask(self, mask_u8: np.ndarray, roi: RoiWindow,
                       crop_shape: Tuple[int, int]) -> SensorResult:
@@ -237,12 +341,12 @@ class Sam2Sensor(Sensor):
         return (ep1, ep2)
 
 
-def build_sam2_sensor(cfg: Dict[str, Any]) -> Sam2Sensor:
+def build_sam2_sensor(cfg: Dict[str, Any], toggles=None) -> Sam2Sensor:
     """
     SAM2 센서 생성. 실패해도 Sam2Sensor 반환 (available=False → measure()는 None).
     MotionMask fallback 제거: TPL+KLT+Kalman만으로 운용.
     """
-    sensor = Sam2Sensor(cfg)
+    sensor = Sam2Sensor(cfg, toggles=toggles)
     if sensor.available:
         return sensor
     print(f"[SAM2] not available ({sensor._init_error}) -> TPL+KLT+Kalman only")

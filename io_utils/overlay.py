@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import cv2
+import numpy as np
 
 from tracking.track import Track, TrackState
 
@@ -30,6 +31,7 @@ class DebugInfo:
     sam2_center: Optional[Tuple[float, float]] = None
     tpl_center: Optional[Tuple[float, float]] = None
     klt_center: Optional[Tuple[float, float]] = None
+    sam2_mask: Optional[np.ndarray] = None  # ROI 좌표 기준 마스크 (0/255)
 
 
 def draw_overlay(
@@ -52,6 +54,37 @@ def draw_overlay(
         # 디버그 정보 그리기
         if debug_infos and tr.id in debug_infos:
             dbg = debug_infos[tr.id]
+
+            # SAM2 mask (반투명 색상 오버레이)
+            if dbg.sam2_mask is not None and dbg.roi is not None:
+                rx0, ry0, rx1, ry1 = dbg.roi
+                mask = dbg.sam2_mask
+                mh, mw = mask.shape[:2]
+
+                # ROI 크기와 마스크 크기가 맞는지 확인
+                roi_h, roi_w = ry1 - ry0, rx1 - rx0
+                if mh == roi_h and mw == roi_w:
+                    # 마스크 영역에 색상 오버레이 (트랙 ID별 색상)
+                    mask_colors = [
+                        (0, 255, 0),    # 녹색 (track 1)
+                        (255, 0, 0),    # 파랑 (track 2)
+                        (0, 0, 255),    # 빨강 (track 3)
+                        (255, 255, 0),  # 시안 (track 4)
+                        (255, 0, 255),  # 마젠타 (track 5)
+                    ]
+                    mask_color = mask_colors[(tr.id - 1) % len(mask_colors)]
+
+                    # ROI 영역 추출
+                    roi_region = frame_bgr[ry0:ry1, rx0:rx1]
+
+                    # 마스크가 있는 곳에 색상 블렌딩
+                    mask_bool = mask > 0
+                    overlay = roi_region.copy()
+                    overlay[mask_bool] = (
+                        np.array(mask_color) * 0.4 +
+                        roi_region[mask_bool] * 0.6
+                    ).astype(np.uint8)
+                    frame_bgr[ry0:ry1, rx0:rx1] = overlay
 
             # ROI (하늘색 사각형)
             if dbg.roi:

@@ -58,6 +58,9 @@ class Track:
     speed_px_s: Optional[float] = None
     _speed_hist: Deque[float] = field(default_factory=lambda: deque(maxlen=120))
 
+    # --- ROI 확장 쿨다운 (hysteresis) ---
+    expansion_cooldown: int = 0  # 0이면 축소 가능, >0이면 확장 유지
+
     def center(self) -> Tuple[Optional[float], Optional[float]]:
         """last_center 우선, 없으면 Kalman 예측."""
         if self.last_center is not None:

@@ -38,10 +38,20 @@ class RoiManager:
         else:
             self.arena_rect = None
 
-    def make_roi(self, cx: float, cy: float, frame_size: Tuple[int, int]) -> RoiWindow:
-        """Kalman 예측 중심 (cx, cy) 기반 ROI 생성. ROI 크기는 고정(base_size)."""
+    def make_roi(self, cx: float, cy: float, frame_size: Tuple[int, int],
+                 expansion_factor: float = 1.0) -> RoiWindow:
+        """
+        Kalman 예측 중심 (cx, cy) 기반 ROI 생성.
+
+        Args:
+            cx, cy: 중심 좌표
+            frame_size: (W, H)
+            expansion_factor: ROI 확장 배율 (1.0 = base_size, 1.5 = 1.5배 확장)
+                             UNCERTAIN/OCCLUDED 상태에서 재획득을 위해 확장
+        """
         W, H = frame_size
-        size = max(self.min_size, min(self.base_size, self.max_size))
+        expanded_size = int(self.base_size * expansion_factor)
+        size = max(self.min_size, min(expanded_size, self.max_size))
         half = size // 2
 
         x0 = int(round(cx - half))

@@ -16,12 +16,13 @@ class TrackStateMachine:
     DEAD_CANDIDATE (장기 정지)
     """
 
-    def __init__(self, cfg: Dict[str, Any]):
+    def __init__(self, cfg: Dict[str, Any], toggles=None):
         sm = cfg.get("tracking", {}).get("state_machine", {})
         self.border_margin = int(sm.get("border_exit_margin_px", 5))
         self.immobile_window = int(sm.get("immobile_window", 60))
         self.immobile_speed = float(sm.get("immobile_speed_px_per_s", 1.0))
         self.merge_dist = float(sm.get("merge_distance_px", 30.0))
+        self._toggles = toggles
 
         qa = cfg.get("qa", {})
         self.uncertain_to_occluded = int(qa.get("uncertain_to_occluded_frames", 5))
@@ -52,10 +53,16 @@ class TrackStateMachine:
 
         # --- UNCERTAIN ---
         if hint == TrackState.UNCERTAIN:
-            track.miss_count += 1
-            if track.miss_count >= self.uncertain_to_occluded:
-                return TrackState.OCCLUDED
-            return TrackState.UNCERTAIN
+            # [SM1] OCCLUDED에서 UNCERTAIN hint → 재획득 시도
+            if (self._toggles is not None and self._toggles.occluded_to_uncertain_recovery
+                    and track.state == TrackState.OCCLUDED):
+                track.miss_count = self.uncertain_to_occluded - 2
+                return TrackState.UNCERTAIN
+            else:
+                track.miss_count += 1
+                if track.miss_count >= self.uncertain_to_occluded:
+                    return TrackState.OCCLUDED
+                return TrackState.UNCERTAIN
 
         # --- OCCLUDED (predict only) ---
         if hint == TrackState.OCCLUDED:
