@@ -119,6 +119,9 @@ toggles:
   # --- Shape Quality ---
   shape_quality_gate: true            # SH1: ShapeStats 기반 bbox HOLD / cache 차단 / quality 감점
 
+  # --- Mask Cleanup ---
+  mask_cleanup: false                  # MC1: 번짐 감지 시 CCF+Expected Region 마스크 정리
+
   # --- Kalman ---
   velocity_decay_on_predict: true    # K1: predict-only 시 velocity 감쇠 (0.5x)
 

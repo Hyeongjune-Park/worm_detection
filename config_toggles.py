@@ -35,6 +35,9 @@ class FeatureToggles:
     # --- Shape Quality ---
     shape_quality_gate: bool = True              # SH1: ShapeStats 기반 bbox/cache/quality 소프트 게이트
 
+    # --- Mask Cleanup ---
+    mask_cleanup: bool = False                   # MC1: 번짐 감지 시 CCF+Expected Region 정리
+
     # --- State Machine ---
     occluded_to_uncertain_recovery: bool = False  # SM1: OCCLUDED→UNCERTAIN 복귀
 

@@ -14,6 +14,7 @@ from io_utils.artifacts import ArtifactWriter, EventWriter
 from io_utils.overlay import draw_overlay, DebugInfo
 from io_utils.debug_logger import DebugLogger, FrameDebugRecord
 from qa.shape_analyzer import analyze_mask, ShapeStats
+from qa.mask_cleanup import cleanup_mask, rebuild_sensor_result
 from config_toggles import FeatureToggles
 
 from preprocess.preprocess import Preprocessor
@@ -235,6 +236,20 @@ def run_pipeline(
                 roi_shape = (roi.y1 - roi.y0, roi.x1 - roi.x0)
                 shape_stats = analyze_mask(sam2_result.mask, prev_ss, roi_shape)
                 prev_shape_stats[tr.id] = shape_stats
+
+                # c-3) [MC1] Mask Cleanup (번짐 의심 시 CCF + Expected Region)
+                if toggles.mask_cleanup and shape_stats.shape_score < 0.8:
+                    baseline = debug_logger.baselines.get(tr.id)
+                    pred_roi = (pred_center[0] - roi.x0, pred_center[1] - roi.y0)
+                    bl_area = baseline.area if baseline else None
+                    bl_ar = baseline.aspect_ratio if baseline else 1.0
+                    cleaned, was_cleaned = cleanup_mask(
+                        sam2_result.mask, pred_roi, bl_area, bl_ar, roi_shape
+                    )
+                    if was_cleaned:
+                        sam2_result = rebuild_sensor_result(cleaned, roi, roi_shape)
+                        shape_stats = analyze_mask(cleaned, prev_ss, roi_shape)
+                        prev_shape_stats[tr.id] = shape_stats
 
                 # 첫 프레임 baseline 저장 (SAM2 품질 좋을 때만)
                 if shape_stats.shape_score >= 0.8:
