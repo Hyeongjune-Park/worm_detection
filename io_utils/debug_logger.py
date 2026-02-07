@@ -117,6 +117,17 @@ class FrameDebugRecord:
         return d
 
 
+@dataclass
+class TrackBaseline:
+    """트랙별 첫 프레임 SAM2 기준값 (이상 감지용)."""
+    area: int = 0
+    thickness_med: float = 0.0
+    thickness_p90: float = 0.0
+    tube_fit: float = 0.0
+    width_cv: float = 0.0
+    aspect_ratio: float = 1.0
+
+
 class DebugLogger:
     """디버그 로거 — JSONL/CSV/events.md/summary 출력."""
 
@@ -132,7 +143,40 @@ class DebugLogger:
         self.prev_centers: Dict[int, Tuple[float, float]] = {}  # track_id -> center
         self.prev_areas: Dict[int, int] = {}  # track_id -> area
 
+        # 트랙별 baseline (첫 프레임 SAM2 결과 기준)
+        self.baselines: Dict[int, TrackBaseline] = {}  # track_id -> baseline
+
+        # 스냅샷 전환점 감지용 상태 (5프레임 지속 필터)
+        self.frame_buffer: Dict[int, List[Tuple[np.ndarray, FrameDebugRecord, Optional[np.ndarray]]]] = {}
+        # track_id -> 최근 6프레임 버퍼 [(frame_bgr, record, sam2_mask), ...]
+        self.flag_streak: Dict[int, int] = {}  # track_id -> 현재 상태 연속 프레임 수
+        self.confirmed_flag_set: Dict[int, frozenset] = {}  # track_id -> 확정된 플래그 집합
+        self.pending_transition: Dict[int, Tuple[int, str, frozenset]] = {}
+        # track_id -> (transition_frame_idx, transition_type, new_flag_set)
+        self.event_counter: int = 0  # 전역 이벤트 번호
+        self.min_persist_frames: int = 5  # 최소 지속 프레임 수
+
         os.makedirs(output_dir, exist_ok=True)
+
+    def set_baseline(self, track_id: int, shape_stats: ShapeStats) -> None:
+        """첫 프레임에서 baseline 설정."""
+        if track_id in self.baselines:
+            return  # 이미 설정됨
+        if shape_stats is None or shape_stats.area < 10:
+            return
+
+        # width_cv에 최소값(floor) 적용: 첫 프레임이 비정상적으로 낮을 경우
+        # false positive 방지 (예: 0.22 -> 0.25로 올려서 2x=0.50 임계값 확보)
+        width_cv_floor = max(shape_stats.skel_width_cv, 0.25)
+
+        self.baselines[track_id] = TrackBaseline(
+            area=shape_stats.area,
+            thickness_med=shape_stats.thickness_med,
+            thickness_p90=shape_stats.thickness_p90,
+            tube_fit=shape_stats.skel_tube_fit,
+            width_cv=width_cv_floor,
+            aspect_ratio=shape_stats.aspect_ratio,
+        )
 
     def record_toggles(self, toggles) -> None:
         """실행 시작 시 호출 — 토글 상태 기록."""
@@ -156,29 +200,58 @@ class DebugLogger:
             self.prev_areas[record.track_id] = record.shape_stats.area
 
     def _detect_anomalies(self, record: FrameDebugRecord):
-        """이상징후 플래그 자동 감지."""
+        """이상징후 플래그 자동 감지 (baseline 기반 상대값 사용)."""
         flags = []
+        ss = record.shape_stats
+        baseline = self.baselines.get(record.track_id)
 
-        # AREA_BLOWUP: 면적 급변
-        if record.area_ratio_prev > 3.0:
-            flags.append(f"AREA_BLOWUP_UP({record.area_ratio_prev:.1f}x)")
-        elif record.area_ratio_prev < 0.3 and record.area_ratio_prev > 0:
-            flags.append(f"AREA_BLOWUP_DOWN({record.area_ratio_prev:.2f}x)")
+        # --- Baseline 기반 상대 비교 ---
+        if baseline and baseline.area > 0 and ss and ss.area > 0:
+            # AREA_BLOWUP: baseline 대비 면적 급변
+            area_ratio = ss.area / baseline.area
+            if area_ratio > 3.0:
+                flags.append(f"AREA_BLOWUP_UP({area_ratio:.1f}x)")
+            elif area_ratio < 0.3:
+                flags.append(f"AREA_BLOWUP_DOWN({area_ratio:.2f}x)")
 
+            # THICKNESS_BLOWUP: baseline 대비 두께 급변
+            if baseline.thickness_p90 > 0:
+                thick_ratio = ss.thickness_p90 / baseline.thickness_p90
+                if thick_ratio > 2.0:
+                    flags.append(f"THICKNESS_BLOWUP({thick_ratio:.1f}x)")
+
+            # TUBE_FIT_DEGRADE: baseline 대비 tube_fit 악화
+            if baseline.tube_fit > 0 and ss.skel_tube_fit > 0:
+                tf_ratio = ss.skel_tube_fit / baseline.tube_fit
+                if tf_ratio < 0.5:
+                    flags.append(f"TUBE_FIT_DEGRADE({tf_ratio:.2f}x)")
+
+            # WIDTH_CV_HIGH: 절대값 기준 (상대비교 대신)
+            # 번짐 판별: Good median=0.60, Bad median=0.99 → 0.85 이상이면 의심
+            if ss.skel_width_cv > 0.85:
+                flags.append(f"WIDTH_CV_HIGH({ss.skel_width_cv:.2f})")
+        else:
+            # baseline 없으면 직전 프레임 대비 (기존 방식)
+            if record.area_ratio_prev > 3.0:
+                flags.append(f"AREA_BLOWUP_UP({record.area_ratio_prev:.1f}x)")
+            elif record.area_ratio_prev < 0.3 and record.area_ratio_prev > 0:
+                flags.append(f"AREA_BLOWUP_DOWN({record.area_ratio_prev:.2f}x)")
+
+        # --- 절대값 기반 플래그 (baseline 무관) ---
         # BORDER_TOUCH_HIGH
-        if record.shape_stats and record.shape_stats.border_touch > 0.35:
-            flags.append(f"BORDER_TOUCH_HIGH({record.shape_stats.border_touch:.2f})")
+        if ss and ss.border_touch > 0.35:
+            flags.append(f"BORDER_TOUCH_HIGH({ss.border_touch:.2f})")
 
-        # THICKNESS_BLOWUP
-        if record.shape_stats and record.shape_stats.thickness_p90 > 60:
-            flags.append(f"THICKNESS_HIGH({record.shape_stats.thickness_p90:.0f})")
-
-        # CENTER_JUMP_OUTLIER
+        # CENTER_JUMP_OUTLIER (baseline 면적의 sqrt 기준)
         prev_center = self.prev_centers.get(record.track_id)
         if prev_center and record.chosen_center:
             jump = ((record.chosen_center[0] - prev_center[0]) ** 2 +
                     (record.chosen_center[1] - prev_center[1]) ** 2) ** 0.5
-            if jump > 100:  # 100px 이상 점프
+            # baseline이 있으면 sqrt(area)의 2배 이상 점프 시 이상
+            jump_thresh = 100.0
+            if baseline and baseline.area > 0:
+                jump_thresh = max(2.0 * (baseline.area ** 0.5), 50.0)
+            if jump > jump_thresh:
                 flags.append(f"CENTER_JUMP({jump:.0f}px)")
 
         # CONSENSUS_BREAK: SAM2와 TPL/KLT 모두 멀리 떨어짐
@@ -186,8 +259,8 @@ class DebugLogger:
             flags.append("CONSENSUS_BREAK")
 
         # LOW_SHAPE_SCORE
-        if record.shape_stats and record.shape_stats.shape_score < 0.5:
-            flags.append(f"LOW_SHAPE_SCORE({record.shape_stats.shape_score:.2f})")
+        if ss and ss.shape_score < 0.5:
+            flags.append(f"LOW_SHAPE_SCORE({ss.shape_score:.2f})")
 
         # ROI_EXPAND_DURING_UNCERTAIN
         if record.state in ("UNCERTAIN", "OCCLUDED") and record.roi_scale > 1.2:
@@ -211,6 +284,230 @@ class DebugLogger:
                 "flags": record.reason_flags.copy(),
             }
             self.events.append(event)
+
+    def _extract_flag_types(self, reason_flags: List[str]) -> frozenset:
+        """플래그 리스트에서 타입만 추출 (괄호 안 값 제거).
+
+        예: ["AREA_BLOWUP_UP(3.5x)", "WIDTH_CV_HIGH(0.91)"]
+            -> frozenset({"AREA_BLOWUP_UP", "WIDTH_CV_HIGH"})
+        """
+        return frozenset(f.split("(")[0] for f in reason_flags if f)
+
+    def handle_snapshot_transition(
+        self,
+        frame_bgr: np.ndarray,
+        record: FrameDebugRecord,
+        sam2_mask: Optional[np.ndarray] = None,
+    ):
+        """플래그 전환점에서만 스냅샷 저장 (5프레임 지속 필터 적용).
+
+        호출 시점: add_record() 후 (reason_flags가 설정된 후)
+        전환이 5프레임 이상 지속되어야 실제 전환으로 인정하고 스냅샷 저장.
+
+        전환 조건:
+        1. clean -> flagged (problem_start)
+        2. flagged -> clean (problem_end)
+        3. 플래그 종류가 바뀜 (problem_change) - 새 플래그 등장
+        """
+        track_id = record.track_id
+        current_flags = self._extract_flag_types(record.reason_flags)
+        confirmed_flags = self.confirmed_flag_set.get(track_id, frozenset())
+
+        # 1) 프레임 버퍼 업데이트 (최근 6프레임 유지)
+        if track_id not in self.frame_buffer:
+            self.frame_buffer[track_id] = []
+        buffer = self.frame_buffer[track_id]
+        buffer.append((frame_bgr.copy(), record, sam2_mask))
+        if len(buffer) > 6:
+            buffer.pop(0)
+
+        # 2) 상태 변화 감지 (플래그 집합 비교)
+        # 전환 타입 결정
+        transition_type = None
+        if not confirmed_flags and current_flags:
+            # clean -> flagged
+            transition_type = "problem_start"
+        elif confirmed_flags and not current_flags:
+            # flagged -> clean
+            transition_type = "problem_end"
+        elif confirmed_flags and current_flags:
+            # 둘 다 있음 → 새 플래그가 나타났는지 확인
+            new_flags = current_flags - confirmed_flags
+            if new_flags:
+                # 새 플래그 등장 = problem_change
+                transition_type = "problem_change"
+
+        # 3) 상태 연속성 추적
+        if transition_type is None:
+            # 확정 상태와 동일 → streak 리셋, pending 취소
+            self.flag_streak[track_id] = 0
+            if track_id in self.pending_transition:
+                del self.pending_transition[track_id]
+        else:
+            # 전환 발생 → streak 증가
+            streak = self.flag_streak.get(track_id, 0) + 1
+            self.flag_streak[track_id] = streak
+
+            # pending transition 등록 (아직 없으면)
+            if track_id not in self.pending_transition:
+                self.pending_transition[track_id] = (record.frame_idx, transition_type, current_flags)
+
+            # 4) 5프레임 지속 확인 → 스냅샷 저장
+            if streak >= self.min_persist_frames:
+                self._confirm_and_save_transition(track_id, current_flags)
+
+    def _confirm_and_save_transition(self, track_id: int, new_flag_set: frozenset):
+        """전환 확정 및 스냅샷 저장."""
+        if track_id not in self.pending_transition:
+            return
+
+        trans_frame_idx, transition_type, _ = self.pending_transition.pop(track_id)
+        buffer = self.frame_buffer.get(track_id, [])
+
+        if len(buffer) < 2:
+            self.confirmed_flag_set[track_id] = new_flag_set
+            self.flag_streak[track_id] = 0
+            return
+
+        # 버퍼에서 frame_idx로 프레임 찾기
+        def find_frame(target_idx):
+            for img, rec, mask in buffer:
+                if rec.frame_idx == target_idx:
+                    return (img, rec, mask)
+            return None
+
+        snapshots_dir = os.path.join(self.output_dir, "snapshots")
+        os.makedirs(snapshots_dir, exist_ok=True)
+
+        self.event_counter += 1
+        event_num = self.event_counter
+
+        # before: 전환 직전 프레임
+        before_data = find_frame(trans_frame_idx - 1)
+        if before_data:
+            img, rec, mask = before_data
+            self._save_snapshot_frame(
+                img, rec, mask, snapshots_dir,
+                f"{event_num:03d}_T{track_id}_before_{transition_type}"
+            )
+
+        # event: 전환 프레임
+        event_data = find_frame(trans_frame_idx)
+        if event_data:
+            img, rec, mask = event_data
+            self._save_snapshot_frame(
+                img, rec, mask, snapshots_dir,
+                f"{event_num:03d}_T{track_id}_event_{transition_type}"
+            )
+
+        # after: 전환 직후 프레임
+        after_data = find_frame(trans_frame_idx + 1)
+        if after_data:
+            img, rec, mask = after_data
+            self._save_snapshot_frame(
+                img, rec, mask, snapshots_dir,
+                f"{event_num:03d}_T{track_id}_after_{transition_type}"
+            )
+
+        # 상태 확정 (플래그 집합으로)
+        self.confirmed_flag_set[track_id] = new_flag_set
+        self.flag_streak[track_id] = 0
+
+    def _save_snapshot_frame(
+        self,
+        frame_bgr: np.ndarray,
+        record: FrameDebugRecord,
+        sam2_mask: Optional[np.ndarray],
+        snapshots_dir: str,
+        filename_prefix: str,
+    ):
+        """단일 스냅샷 프레임 저장 (시각화 포함)."""
+        img = frame_bgr.copy()
+
+        # 트랙별 마스크 색상
+        mask_colors = [
+            (0, 255, 0), (255, 0, 0), (0, 0, 255),
+            (255, 255, 0), (255, 0, 255),
+        ]
+        mask_color = mask_colors[(record.track_id - 1) % len(mask_colors)]
+
+        # 상태별 색상
+        state_colors = {
+            "ACTIVE": (0, 255, 0), "UNCERTAIN": (0, 255, 255),
+            "OCCLUDED": (0, 165, 255), "MERGED": (255, 255, 0),
+            "NEEDS_RESEED": (255, 0, 255),
+        }
+        state_color = state_colors.get(record.state, (200, 200, 200))
+
+        # SAM2 마스크 반투명 오버레이
+        if sam2_mask is not None and record.roi_xyxy is not None:
+            rx0, ry0, rx1, ry1 = record.roi_xyxy
+            mh, mw = sam2_mask.shape[:2]
+            roi_h, roi_w = ry1 - ry0, rx1 - rx0
+            if mh == roi_h and mw == roi_w:
+                roi_region = img[ry0:ry1, rx0:rx1]
+                mask_bool = sam2_mask > 0
+                overlay = roi_region.copy()
+                overlay[mask_bool] = (
+                    np.array(mask_color) * 0.4 + roi_region[mask_bool] * 0.6
+                ).astype(np.uint8)
+                img[ry0:ry1, rx0:rx1] = overlay
+
+        # ROI 사각형
+        if record.roi_xyxy:
+            rx0, ry0, rx1, ry1 = record.roi_xyxy
+            cv2.rectangle(img, (rx0, ry0), (rx1, ry1), (255, 255, 0), 2)
+
+        # 센서별 중심점 마커
+        if record.pred_center:
+            px, py = int(record.pred_center[0]), int(record.pred_center[1])
+            cv2.drawMarker(img, (px, py), (255, 255, 255), cv2.MARKER_TILTED_CROSS, 12, 2)
+        if record.sam2_center:
+            sx, sy = int(record.sam2_center[0]), int(record.sam2_center[1])
+            cv2.circle(img, (sx, sy), 8, (0, 255, 0), 2)
+        if record.tpl_center:
+            tx, ty = int(record.tpl_center[0]), int(record.tpl_center[1])
+            cv2.rectangle(img, (tx-6, ty-6), (tx+6, ty+6), (255, 0, 0), 2)
+        if record.klt_center:
+            kx, ky = int(record.klt_center[0]), int(record.klt_center[1])
+            cv2.drawMarker(img, (kx, ky), (0, 0, 255), cv2.MARKER_DIAMOND, 10, 2)
+        if record.chosen_center:
+            cx, cy = int(record.chosen_center[0]), int(record.chosen_center[1])
+            cv2.circle(img, (cx, cy), 5, state_color, -1)
+
+        # 트랙 라벨 + shape 정보
+        label_x, label_y = 10, 30
+        if record.chosen_center:
+            label_x = int(record.chosen_center[0])
+            label_y = max(20, int(record.chosen_center[1]) - 15)
+
+        line1 = f"T{record.track_id} {record.state}"
+        if record.sensor_used:
+            line1 += f" [{record.sensor_used}]"
+
+        if record.shape_stats:
+            ss = record.shape_stats
+            line2 = f"ss={ss.shape_score:.2f} tf={ss.skel_tube_fit:.2f} wcv={ss.skel_width_cv:.2f}"
+        else:
+            line2 = f"q={record.quality_score:.2f}"
+
+        for i, line in enumerate([line1, line2]):
+            ty = label_y + i * 16
+            (tw, th), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            cv2.rectangle(img, (label_x - 2, ty - th - 2), (label_x + tw + 2, ty + 2), (0, 0, 0), -1)
+            cv2.putText(img, line, (label_x, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, state_color, 1, cv2.LINE_AA)
+
+        # 플래그
+        if record.reason_flags:
+            flag_text = " | ".join(record.reason_flags[:4])
+            h, w = img.shape[:2]
+            cv2.putText(img, flag_text, (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
+
+        # 프레임 번호
+        cv2.putText(img, f"F{record.frame_idx:04d}", (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+        filename = f"{filename_prefix}_F{record.frame_idx:04d}.png"
+        cv2.imwrite(os.path.join(snapshots_dir, filename), img)
 
     def save_all(self):
         """모든 로그 파일 저장."""
@@ -315,34 +612,121 @@ def save_debug_snapshot(
     frame_bgr: np.ndarray,
     record: FrameDebugRecord,
     output_dir: str,
+    sam2_mask: Optional[np.ndarray] = None,
 ):
-    """이벤트 프레임 스냅샷 저장 (오버레이 포함)."""
+    """이벤트 프레임 스냅샷 저장 (overlay 스타일 시각화).
+
+    Args:
+        frame_bgr: 원본 프레임
+        record: 디버그 레코드 (좌표, shape_stats 등)
+        output_dir: 출력 디렉토리
+        sam2_mask: SAM2 마스크 (ROI 좌표 기준, 0/255)
+    """
     snapshots_dir = os.path.join(output_dir, "snapshots")
     os.makedirs(snapshots_dir, exist_ok=True)
 
     img = frame_bgr.copy()
 
-    # 텍스트 오버레이
-    lines = [
-        f"F{record.frame_idx:04d} T{record.track_id} {record.state}",
-        f"sensor={record.sensor_used} q={record.quality_score:.2f}",
+    # 트랙별 마스크 색상
+    mask_colors = [
+        (0, 255, 0),    # 녹색 (track 1)
+        (255, 0, 0),    # 파랑 (track 2)
+        (0, 0, 255),    # 빨강 (track 3)
+        (255, 255, 0),  # 시안 (track 4)
+        (255, 0, 255),  # 마젠타 (track 5)
     ]
+    mask_color = mask_colors[(record.track_id - 1) % len(mask_colors)]
 
+    # 상태별 색상
+    state_colors = {
+        "ACTIVE": (0, 255, 0),
+        "UNCERTAIN": (0, 255, 255),
+        "OCCLUDED": (0, 165, 255),
+        "MERGED": (255, 255, 0),
+        "NEEDS_RESEED": (255, 0, 255),
+    }
+    state_color = state_colors.get(record.state, (200, 200, 200))
+
+    # --- 1) SAM2 마스크 반투명 오버레이 ---
+    if sam2_mask is not None and record.roi_xyxy is not None:
+        rx0, ry0, rx1, ry1 = record.roi_xyxy
+        mh, mw = sam2_mask.shape[:2]
+        roi_h, roi_w = ry1 - ry0, rx1 - rx0
+
+        if mh == roi_h and mw == roi_w:
+            roi_region = img[ry0:ry1, rx0:rx1]
+            mask_bool = sam2_mask > 0
+            overlay = roi_region.copy()
+            overlay[mask_bool] = (
+                np.array(mask_color) * 0.4 +
+                roi_region[mask_bool] * 0.6
+            ).astype(np.uint8)
+            img[ry0:ry1, rx0:rx1] = overlay
+
+    # --- 2) ROI 사각형 (하늘색) ---
+    if record.roi_xyxy:
+        rx0, ry0, rx1, ry1 = record.roi_xyxy
+        cv2.rectangle(img, (rx0, ry0), (rx1, ry1), (255, 255, 0), 2)
+
+    # --- 3) 센서별 중심점 마커 ---
+    # PRED center (흰색 X)
+    if record.pred_center:
+        px, py = int(record.pred_center[0]), int(record.pred_center[1])
+        cv2.drawMarker(img, (px, py), (255, 255, 255), cv2.MARKER_TILTED_CROSS, 12, 2)
+
+    # SAM2 center (녹색 원)
+    if record.sam2_center:
+        sx, sy = int(record.sam2_center[0]), int(record.sam2_center[1])
+        cv2.circle(img, (sx, sy), 8, (0, 255, 0), 2)
+
+    # TPL center (파란색 사각형)
+    if record.tpl_center:
+        tx, ty = int(record.tpl_center[0]), int(record.tpl_center[1])
+        cv2.rectangle(img, (tx-6, ty-6), (tx+6, ty+6), (255, 0, 0), 2)
+
+    # KLT center (빨간색 마름모)
+    if record.klt_center:
+        kx, ky = int(record.klt_center[0]), int(record.klt_center[1])
+        cv2.drawMarker(img, (kx, ky), (0, 0, 255), cv2.MARKER_DIAMOND, 10, 2)
+
+    # chosen center (상태 색상 채워진 원)
+    if record.chosen_center:
+        cx, cy = int(record.chosen_center[0]), int(record.chosen_center[1])
+        cv2.circle(img, (cx, cy), 5, state_color, -1)
+
+    # --- 4) 트랙 라벨 + shape 정보 (중심 근처) ---
+    label_x, label_y = 10, 30
+    if record.chosen_center:
+        label_x = int(record.chosen_center[0])
+        label_y = max(20, int(record.chosen_center[1]) - 15)
+
+    # 첫 줄: ID + 상태 + 센서
+    line1 = f"T{record.track_id} {record.state}"
+    if record.sensor_used:
+        line1 += f" [{record.sensor_used}]"
+
+    # 둘째 줄: shape 점수 + skeleton 정보
     if record.shape_stats:
         ss = record.shape_stats
-        lines.append(f"area={ss.area} ratio={record.area_ratio_prev:.2f}")
-        lines.append(f"border={ss.border_touch:.2f} shape={ss.shape_score:.2f}")
-        lines.append(f"thick_med={ss.thickness_med:.1f} p90={ss.thickness_p90:.1f}")
-        lines.append(f"mode={ss.shape_mode}")
+        line2 = f"ss={ss.shape_score:.2f} tf={ss.skel_tube_fit:.2f} wcv={ss.skel_width_cv:.2f}"
+    else:
+        line2 = f"q={record.quality_score:.2f}"
 
+    # 텍스트 배경 (가독성)
+    for i, line in enumerate([line1, line2]):
+        ty = label_y + i * 16
+        (tw, th), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        cv2.rectangle(img, (label_x - 2, ty - th - 2), (label_x + tw + 2, ty + 2), (0, 0, 0), -1)
+        cv2.putText(img, line, (label_x, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, state_color, 1, cv2.LINE_AA)
+
+    # --- 5) 플래그 (화면 좌하단) ---
     if record.reason_flags:
-        lines.append(f"FLAGS: {', '.join(record.reason_flags[:3])}")
+        flag_text = " | ".join(record.reason_flags[:4])
+        h, w = img.shape[:2]
+        cv2.putText(img, flag_text, (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
 
-    y = 30
-    for line in lines:
-        cv2.putText(img, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (0, 255, 255), 1, cv2.LINE_AA)
-        y += 18
+    # --- 6) 프레임 번호 (좌상단) ---
+    cv2.putText(img, f"F{record.frame_idx:04d}", (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
     filename = f"frame_{record.frame_idx:04d}_track_{record.track_id}.png"
     cv2.imwrite(os.path.join(snapshots_dir, filename), img)
