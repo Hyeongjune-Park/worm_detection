@@ -116,6 +116,9 @@ toggles:
   klt_divergence_reinit: true        # S3: KLT-SAM2 발산 시 KLT 재초기화
   sam2_mask_caching: true            # S4: SAM2 QA 통과 시 결과 캐싱
 
+  # --- Shape Quality ---
+  shape_quality_gate: true            # SH1: ShapeStats 기반 bbox HOLD / cache 차단 / quality 감점
+
   # --- Kalman ---
   velocity_decay_on_predict: true    # K1: predict-only 시 velocity 감쇠 (0.5x)
 

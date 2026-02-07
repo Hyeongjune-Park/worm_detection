@@ -12,7 +12,7 @@ from io_utils.video_reader import VideoReader
 from io_utils.video_writer import OverlayWriter
 from io_utils.artifacts import ArtifactWriter, EventWriter
 from io_utils.overlay import draw_overlay, DebugInfo
-from io_utils.debug_logger import DebugLogger, FrameDebugRecord, save_debug_snapshot
+from io_utils.debug_logger import DebugLogger, FrameDebugRecord
 from qa.shape_analyzer import analyze_mask, ShapeStats
 from config_toggles import FeatureToggles
 
@@ -228,6 +228,21 @@ def run_pipeline(
             tpl_result = tpl_sensor.measure(tr, roi, crop_bgr, crop_gray, frame_idx)
             klt_result = klt_sensor.measure(tr, roi, crop_bgr, crop_gray, frame_idx)
 
+            # c-2) ShapeStats 계산 (fusion 전에 수행 — shape gate 용)
+            shape_stats = None
+            if sam2_result is not None and sam2_result.mask is not None:
+                prev_ss = prev_shape_stats.get(tr.id)
+                roi_shape = (roi.y1 - roi.y0, roi.x1 - roi.x0)
+                shape_stats = analyze_mask(sam2_result.mask, prev_ss, roi_shape)
+                prev_shape_stats[tr.id] = shape_stats
+
+                # 첫 프레임 baseline 저장 (SAM2 품질 좋을 때만)
+                if shape_stats.shape_score >= 0.8:
+                    debug_logger.set_baseline(tr.id, shape_stats)
+
+            # shape_score 추출 (fusion과 bbox gate에 전달)
+            shape_score = shape_stats.shape_score if shape_stats is not None else None
+
             # d) Fusion + QA
             is_merged = (tr.state == TrackState.MERGED)
             roi_size_val = float(roi.x1 - roi.x0)
@@ -247,10 +262,15 @@ def run_pipeline(
                 prev_area=prev_area,
                 track_state=tr.state,
                 toggles=toggles,
+                shape_score=shape_score,
             )
 
             # [S4] SAM2 QA 통과 시 prev_mask 캐시 확정
-            if toggles.sam2_mask_caching and fusion.sensor_used == "SAM2":
+            # [SH1] shape 나쁘면 캐시 차단 (prev_area 오염 방지)
+            shape_cache_ok = (not toggles.shape_quality_gate
+                              or shape_score is None
+                              or shape_score >= 0.8)
+            if toggles.sam2_mask_caching and fusion.sensor_used == "SAM2" and shape_cache_ok:
                 sam2_sensor.cache_good_result(tr.id)
 
             # e) Kalman update
@@ -294,6 +314,10 @@ def run_pipeline(
                     and sam2_result.bbox_roi is not None
                     and fusion.sensor_used == "SAM2"
                 )
+
+            # [SH1] shape 나쁘면 bbox HOLD (prompt_bbox 오염 방지)
+            if toggles.shape_quality_gate and shape_score is not None and shape_score < 0.8:
+                sam2_bbox_ok = False
 
             if sam2_bbox_ok:
                 full_bbox = roi_mgr.to_full_coords_bbox(sam2_result.bbox_roi, roi)
@@ -360,12 +384,7 @@ def run_pipeline(
             )
 
             # m) 상세 디버그 로깅
-            shape_stats = None
-            if sam2_result is not None and sam2_result.mask is not None:
-                prev_ss = prev_shape_stats.get(tr.id)
-                roi_shape = (roi.y1 - roi.y0, roi.x1 - roi.x0)
-                shape_stats = analyze_mask(sam2_result.mask, prev_ss, roi_shape)
-                prev_shape_stats[tr.id] = shape_stats
+            # (shape_stats는 c-2에서 이미 계산됨)
 
             def _dist(a, b):
                 if a is None or b is None:
@@ -409,8 +428,9 @@ def run_pipeline(
             )
             debug_logger.add_record(debug_rec)
 
-            if debug_rec.reason_flags:
-                save_debug_snapshot(frame_bgr, debug_rec, str(out_dir))
+            # 전환점 스냅샷 (플래그 유무가 바뀔 때만 저장)
+            sam2_mask = sam2_result.mask if sam2_result and sam2_result.mask is not None else None
+            debug_logger.handle_snapshot_transition(frame_bgr, debug_rec, sam2_mask)
 
         # --- Merge detection ---
         merge_events = state_machine.check_merges(tracks)

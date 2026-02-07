@@ -46,6 +46,7 @@ def fuse(
     prev_area: Optional[int] = None,
     track_state: Optional[TrackState] = None,
     toggles: Optional["FeatureToggles"] = None,
+    shape_score: Optional[float] = None,
 ) -> FusionResult:
     """
     다중 센서 교차검증 + 융합.
@@ -113,6 +114,7 @@ def fuse(
     debug["area_penalty"] = area_penalty
     debug["curr_area"] = curr_area if curr_area is not None else -1
     debug["prev_area"] = prev_area if prev_area is not None else -1
+    debug["shape_score"] = shape_score if shape_score is not None else -1.0
 
     # --- 모드 판단 ---
     is_reacquire = track_state in (TrackState.UNCERTAIN, TrackState.OCCLUDED)
@@ -132,6 +134,20 @@ def fuse(
     debug["tpl_agrees"] = 1.0 if tpl_agrees else 0.0
     debug["klt_agrees"] = 1.0 if klt_agrees else 0.0
     debug["has_consensus"] = 1.0 if has_consensus else 0.0
+
+    # --- [SH1] shape 기반 전체 센서 거부 (심각한 번짐 시 predict-only) ---
+    if toggles.shape_quality_gate and shape_score is not None and shape_score < 0.6:
+        debug["shape_reject"] = 1.0
+        return FusionResult(
+            center=pred_center,
+            sensor_used="PRED",
+            quality_score=0.0,
+            do_kalman_update=False,
+            measurement_r=25.0,
+            state_hint=TrackState.OCCLUDED,
+            debug=debug,
+        )
+    debug["shape_reject"] = 0.0
 
     # --- Case A: SAM2 채택 ---
     if c_sam2 is not None and sam2_trustable:
@@ -155,7 +171,7 @@ def fuse(
                 dist_pred_ratio, dist_pred_th, sam2_r,
                 border_ok, shape_ok, area_check_available,
                 has_consensus, area_penalty, is_reacquire,
-                qa, debug, toggles,
+                qa, debug, toggles, shape_score,
             )
         else:
             result = _fuse_case_a_base(
@@ -193,9 +209,15 @@ def _fuse_case_a_split(
     dist_pred_ratio, dist_pred_th, sam2_r,
     border_ok, shape_ok, area_check_available,
     has_consensus, area_penalty, is_reacquire,
-    qa, debug, toggles,
+    qa, debug, toggles, shape_score=None,
 ) -> Optional[FusionResult]:
     """[F1=ON] ACTIVE/REACQUIRE 모드 분리 SAM2 채택 로직."""
+
+    # [SH1] shape_score 기반 quality 페널티 (< 0.6 거부는 fuse() 최상단에서 처리)
+    shape_penalty = 0.0
+    if toggles.shape_quality_gate and shape_score is not None and shape_score < 0.8:
+        shape_penalty = min((0.8 - shape_score) * 1.0, 0.3)
+    debug["shape_penalty"] = shape_penalty
 
     if not is_reacquire:
         # --- ACTIVE 모드: 엄격 (consensus 필수, area 없으면 소프트 페널티) ---
@@ -204,7 +226,7 @@ def _fuse_case_a_split(
             return None
 
         base_quality = min(1.0, sam2.confidence if sam2 else 0.5)
-        adjusted_quality = max(0.0, base_quality - area_penalty)
+        adjusted_quality = max(0.0, base_quality - area_penalty - shape_penalty)
 
         # area_check 미가용 시 소프트 페널티 (순환 의존 방지)
         if not area_check_available:
@@ -243,7 +265,7 @@ def _fuse_case_a_split(
             return None
 
         base_quality = min(1.0, sam2.confidence if sam2 else 0.5)
-        adjusted_quality = max(0.0, base_quality - area_penalty)
+        adjusted_quality = max(0.0, base_quality - area_penalty - shape_penalty)
 
         # consensus 없으면 추가 페널티
         if not has_consensus:
