@@ -244,6 +244,9 @@ def _fuse_case_a_split(
         quality_uncertain_th = float(qa.get("quality_uncertain_threshold", 0.7))
         hint = TrackState.ACTIVE if adjusted_quality >= quality_uncertain_th else TrackState.UNCERTAIN
 
+        # quality 기반 R 스케일링 (저품질 update 드리프트 억제)
+        effective_r = _quality_r_scale(effective_r, adjusted_quality)
+
         debug["pred_penalty"] = pred_penalty
         debug["effective_r"] = effective_r
         debug["mode"] = 0.0  # ACTIVE
@@ -297,6 +300,9 @@ def _fuse_case_a_split(
         else:
             hint = TrackState.UNCERTAIN
 
+        # quality 기반 R 스케일링 (저품질 update 드리프트 억제)
+        effective_r = _quality_r_scale(effective_r, adjusted_quality)
+
         debug["pred_penalty"] = pred_penalty
         debug["effective_r"] = effective_r
         debug["consensus_r_mult"] = consensus_r_mult
@@ -347,6 +353,9 @@ def _fuse_case_a_base(
 
     hint = TrackState.ACTIVE
 
+    # quality 기반 R 스케일링 (저품질 update 드리프트 억제)
+    effective_r = _quality_r_scale(effective_r, adjusted_quality)
+
     debug["pred_penalty"] = pred_penalty
     debug["effective_r"] = effective_r
     debug["mode"] = -1.0  # BASE (no split)
@@ -383,6 +392,21 @@ def _apply_pred_penalty(
         pred_penalty = 0.0
         effective_r = base_r
     return pred_penalty, effective_r
+
+
+def _quality_r_scale(base_r: float, quality: float) -> float:
+    """quality 기반 measurement_r 스케일링.
+
+    quality >= 0.8 → R 그대로 (고신뢰)
+    0.6 <= quality < 0.8 → R을 최대 3배까지 증가 (저신뢰 update 드리프트 억제)
+    quality < 0.6 → R × 5 (거의 무시)
+    """
+    if quality >= 0.8:
+        return base_r
+    if quality >= 0.6:
+        scale = 1.0 + 2.0 * (0.8 - quality) / 0.2  # 1.0 ~ 3.0
+        return base_r * scale
+    return base_r * 5.0
 
 
 def _fuse_case_b(

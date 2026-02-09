@@ -180,7 +180,7 @@ def _apply_expected_region(
 ) -> np.ndarray:
     """Kalman 예측 + baseline 크기로 예상 영역 제한 (AND)."""
     h, w = roi_shape
-    ar = max(baseline_aspect_ratio, 1.0)
+    ar = max(baseline_aspect_ratio, 1.0 / max(baseline_aspect_ratio, 0.01))
 
     # 타원 반지름 계산: area = pi * a * b, a = ar * b
     b = math.sqrt(baseline_area / (math.pi * ar))
