@@ -46,6 +46,18 @@ class KalmanFilter2D:
     def get_velocity(self) -> tuple[float, float]:
         return float(self.x[2]), float(self.x[3])
 
+    def innovation_check(self, zx: float, zy: float) -> float:
+        """Mahalanobis distance for innovation gating (outlier rejection).
+
+        Returns squared Mahalanobis distance.
+        chi-squared 99% for 2 DOF = 9.21.
+        """
+        z = np.array([zx, zy], dtype=np.float32)
+        y = z - (self.H @ self.x)
+        S = self.H @ self.P @ self.H.T + self.R
+        S_inv = np.linalg.inv(S)
+        return float(y @ S_inv @ y)
+
     def decay_velocity(self, factor: float = 0.5):
         """predict-only 반복 시 속도를 감쇠하여 무한 드리프트 방지."""
         self.x[2] *= factor

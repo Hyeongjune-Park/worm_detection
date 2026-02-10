@@ -289,13 +289,35 @@ def run_pipeline(
                 sam2_sensor.cache_good_result(tr.id)
 
             # e) Kalman update
+            rejected_by_gate = False
             if fusion.do_kalman_update:
                 tr.kf.set_measurement_noise(fusion.measurement_r)
-                tr.kf.update(fusion.center[0], fusion.center[1])
+
+                # [K2] Innovation gating — Mahalanobis outlier rejection
+                # ACTIVE 상태에서만 적용 (REACQUIRE는 큰 이동이 정상이므로 제외)
+                maha_threshold = 50.0
+                if toggles.innovation_gating and tr.state == TrackState.ACTIVE:
+                    maha = tr.kf.innovation_check(fusion.center[0], fusion.center[1])
+                    fusion.debug["maha"] = maha
+                    if maha > maha_threshold:
+                        rejected_by_gate = True
+                        if toggles.velocity_decay_on_predict:
+                            tr.kf.decay_velocity(0.5)
+                    else:
+                        tr.kf.update(fusion.center[0], fusion.center[1])
+                else:
+                    tr.kf.update(fusion.center[0], fusion.center[1])
             else:
                 # [K1] predict-only 속도 감쇠
                 if toggles.velocity_decay_on_predict:
                     tr.kf.decay_velocity(0.5)
+
+            # Innovation gate reject 시 fusion 결과를 predict-only로 덮어쓰기
+            if rejected_by_gate:
+                fusion.center = pred_center
+                fusion.sensor_used = "PRED"
+                fusion.quality_score = 0.0
+                fusion.do_kalman_update = False
 
             # f) Track 필드 갱신
             tr.last_center = fusion.center

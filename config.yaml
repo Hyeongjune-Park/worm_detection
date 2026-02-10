@@ -124,6 +124,7 @@ toggles:
 
   # --- Kalman ---
   velocity_decay_on_predict: true    # K1: predict-only 시 velocity 감쇠 (0.5x)
+  innovation_gating: false           # K2: Mahalanobis outlier gating (기본 OFF)
 
   # --- State Machine ---
   occluded_to_uncertain_recovery: false  # SM1: OCCLUDED→UNCERTAIN 복귀 허용 (기본 OFF)
