@@ -22,6 +22,7 @@ class FeatureToggles:
     expansion_cooldown: bool = False          # P3: 확장 쿨다운 5프레임
     sam2_bbox_sync: bool = False              # P4: SAM2 bbox 독립 동기화
     reacquire_box_expansion: bool = False     # P5: REACQUIRE 시 box prompt 확장
+    adaptive_prompt_box: bool = False         # P6: SAM2 box prompt를 mask bbox EMA로 적응
 
     # --- Sensor ---
     composite_mask_selection: bool = True     # S1: 복합 마스크 선택

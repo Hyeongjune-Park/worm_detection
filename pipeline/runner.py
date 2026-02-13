@@ -371,6 +371,24 @@ def run_pipeline(
                 tr.bbox = (int(fcx - half_w), int(fcy - half_h),
                            int(fcx + half_w), int(fcy + half_h))
 
+            # [P6] Adaptive prompt box — 좋은 SAM2 마스크 bbox로 EMA 갱신
+            if toggles.adaptive_prompt_box and sam2_bbox_ok and sam2_result.bbox_roi is not None:
+                mask_w = sam2_result.bbox_roi[2] - sam2_result.bbox_roi[0]
+                mask_h = sam2_result.bbox_roi[3] - sam2_result.bbox_roi[1]
+                alpha = 0.2
+                if tr.prompt_bbox_size is not None:
+                    old_w, old_h = tr.prompt_bbox_size
+                    new_w = (1 - alpha) * old_w + alpha * mask_w
+                    new_h = (1 - alpha) * old_h + alpha * mask_h
+                else:
+                    new_w, new_h = float(mask_w), float(mask_h)
+                # seed 대비 [0.7x, 1.8x] clamp
+                if tr.seed_bbox_size is not None:
+                    sw, sh = tr.seed_bbox_size
+                    new_w = max(sw * 0.7, min(new_w, sw * 1.8))
+                    new_h = max(sh * 0.7, min(new_h, sh * 1.8))
+                tr.prompt_bbox_size = (new_w, new_h)
+
             # g) Head 추정
             velocity = tr.kf.get_velocity()
             tr.last_head = head_est.estimate(

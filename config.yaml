@@ -109,6 +109,7 @@ toggles:
   expansion_cooldown: false          # P3: ROI 확장 쿨다운 5프레임 (기본 OFF)
   sam2_bbox_sync: false              # P4: SAM2 bbox 독립 동기화 (위험, 기본 OFF)
   reacquire_box_expansion: false     # P5: REACQUIRE 시 box prompt 확장 (기본 OFF)
+  adaptive_prompt_box: false         # P6: SAM2 box prompt EMA 적응 (기본 OFF)
 
   # --- Sensor ---
   composite_mask_selection: true     # S1: SAM2 복합 점수 마스크 선택

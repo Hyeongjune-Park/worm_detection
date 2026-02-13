@@ -37,6 +37,7 @@ class Track:
     bbox: Optional[Tuple[int, int, int, int]] = None
     area: Optional[int] = None
     seed_bbox_size: Optional[Tuple[int, int]] = None  # (width, height) from initial seed
+    prompt_bbox_size: Optional[Tuple[float, float]] = None  # (w, h) adaptive prompt box (EMA)
 
     # --- 센서 메모리 ---
     template: Optional[np.ndarray] = None           # gray+edge patch

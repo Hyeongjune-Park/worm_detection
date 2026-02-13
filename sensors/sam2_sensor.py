@@ -126,15 +126,17 @@ class Sam2Sensor(Sensor):
         cx_roi = pred_x - roi.x0
         cy_roi = pred_y - roi.y0
 
-        # Box 크기: seed bbox 크기 기반 (box_expansion으로 확장 가능)
-        # 사용자가 시드 지정 시 벌레 전체를 감싸도록 그리므로 그 크기가 기준
-        # UNCERTAIN/OCCLUDED 상태에서는 box_expansion=1.5로 확장하여 재획득 시도
-        if track.seed_bbox_size is not None:
+        # Box 크기: prompt_bbox_size(P6 adaptive) → seed_bbox_size → fallback 순
+        if track.prompt_bbox_size is not None:
+            box_w, box_h = track.prompt_bbox_size
+            half_w = int(box_w * box_expansion) // 2
+            half_h = int(box_h * box_expansion) // 2
+        elif track.seed_bbox_size is not None:
             seed_w, seed_h = track.seed_bbox_size
             half_w = int(seed_w * box_expansion) // 2
             half_h = int(seed_h * box_expansion) // 2
         else:
-            half_w = int(50 * box_expansion)  # fallback: 100x100 * expansion
+            half_w = int(50 * box_expansion)
             half_h = int(50 * box_expansion)
 
         box = np.array([
